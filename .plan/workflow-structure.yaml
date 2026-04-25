@@ -1,0 +1,131 @@
+linear: true
+yaml_source_mode: inline-only
+verifier_encoding: explicit-phases
+phases:
+  - order: 1
+    id: implement-validator-selection
+    type: implement
+    bounce_target: null
+    required_preexisting_inputs:
+      - README.md
+      - Makefile
+      - .gitignore
+      - tools/__init__.py
+      - tests/__init__.py
+      - .work/
+      - dist/
+      - https://safelibs.github.io/validator/site-data.json
+      - port-04-test proof fields: mode, proof_version, suite, totals, libraries, port_repository, port_release_tag, port_commit, port_debs
+  - order: 2
+    id: check-validator-selection
+    type: check
+    bounce_target: implement-validator-selection
+    required_preexisting_inputs:
+      - Makefile
+      - tools/__init__.py
+      - tools/validator_selection.py
+      - tools/fetch_port_debs.py
+      - tests/__init__.py
+      - tests/test_validator_selection.py
+      - tests/test_fetch_port_debs.py
+      - tests/fixtures/validator-site-data.json
+      - tests/fixtures/validator-selection.json
+      - dist/validator-selection.json
+      - dist/port-debs-lock.json
+      - .work/debs/port-04-test/
+      - https://safelibs.github.io/validator/site-data.json
+  - order: 3
+    id: implement-docker-build
+    type: implement
+    bounce_target: null
+    required_preexisting_inputs:
+      - Makefile
+      - dist/validator-selection.json
+      - dist/port-debs-lock.json
+      - .work/debs/port-04-test/
+      - "Makefile target: resolve-validator"
+      - "Makefile target: fetch-port-debs"
+      - "Makefile variable: BASE_IMAGE"
+      - "Makefile variable: WORKSPACE"
+      - "Makefile variable: DIST"
+      - "Makefile variable: IMAGE_NAMESPACE"
+  - order: 4
+    id: check-docker-build
+    type: check
+    bounce_target: implement-docker-build
+    required_preexisting_inputs:
+      - Makefile
+      - "Makefile target: build-images"
+      - "Makefile target: verify-images"
+      - "Makefile variable: BASE_IMAGE"
+      - "Makefile variable: WORKSPACE"
+      - "Makefile variable: DIST"
+      - "Makefile variable: IMAGE_NAMESPACE"
+      - tools/build_images.py
+      - tools/verify_images.py
+      - tests/test_build_images.py
+      - tests/test_verify_images.py
+      - tests/fixtures/port-debs-lock.json
+      - tests/fixtures/image-build-plan.json
+      - dist/port-debs-lock.json
+      - dist/image-build-plan.json
+      - .work/debs/port-04-test/
+  - order: 5
+    id: implement-ci-workflow
+    type: implement
+    bounce_target: null
+    required_preexisting_inputs:
+      - README.md
+      - Makefile
+      - tools/__init__.py
+      - tools/validator_selection.py
+      - tools/fetch_port_debs.py
+      - tools/build_images.py
+      - tools/verify_images.py
+      - tests/test_validator_selection.py
+      - tests/test_fetch_port_debs.py
+      - tests/test_build_images.py
+      - tests/test_verify_images.py
+      - tests/fixtures/validator-site-data.json
+      - tests/fixtures/validator-selection.json
+      - tests/fixtures/port-debs-lock.json
+      - tests/fixtures/image-build-plan.json
+      - dist/validator-selection.json
+      - dist/port-debs-lock.json
+      - dist/image-build-plan.json
+      - .work/debs/port-04-test/
+      - .work/contexts/
+      - DOCKERHUB_USERNAME
+      - DOCKERHUB_TOKEN
+      - safelibs Docker Hub namespace with push authorization for safelibs/<library>:latest and safelibs/all:latest
+  - order: 6
+    id: check-ci-workflow
+    type: check
+    bounce_target: implement-ci-workflow
+    required_preexisting_inputs:
+      - README.md
+      - Makefile
+      - .github/workflows/ci.yml
+      - tools/__init__.py
+      - tools/validator_selection.py
+      - tools/fetch_port_debs.py
+      - tools/build_images.py
+      - tools/verify_images.py
+      - tools/publish_images.py
+      - tests/test_validator_selection.py
+      - tests/test_fetch_port_debs.py
+      - tests/test_build_images.py
+      - tests/test_verify_images.py
+      - tests/test_publish_images.py
+      - tests/fixtures/validator-site-data.json
+      - tests/fixtures/validator-selection.json
+      - tests/fixtures/port-debs-lock.json
+      - tests/fixtures/image-build-plan.json
+      - dist/validator-selection.json
+      - dist/port-debs-lock.json
+      - dist/image-build-plan.json
+      - .work/debs/port-04-test/
+      - .work/contexts/
+      - DOCKERHUB_USERNAME
+      - DOCKERHUB_TOKEN
+      - safelibs Docker Hub namespace with push authorization for safelibs/<library>:latest and safelibs/all:latest

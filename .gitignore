@@ -1,4 +1,8 @@
-/.plan/
+/.plan/*
+!/.plan/phases/
+/.plan/phases/*
+!/.plan/phases/*.md
+!/.plan/workflow-structure.yaml
 /.work/
 /dist/
 /.secrets/
