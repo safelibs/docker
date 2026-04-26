@@ -6,7 +6,13 @@ from pathlib import Path
 from unittest import TestCase
 
 from tools import ensure_directory, read_json, repo_relative_path, repo_root
-from tools.build_images import build_image_plan, prepare_context, render_dockerfile
+from tools.build_images import (
+    _prepare_staged_aggregate_context,
+    _requires_staged_aggregate_build,
+    build_image_plan,
+    prepare_context,
+    render_dockerfile,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 ALPHA_BYTES = b"alpha-runtime-deb\n"
@@ -143,7 +149,7 @@ class BuildImagesTests(TestCase):
             (context_dir / "debs" / "libalpha1_1.0-1safelibs1_amd64.deb").read_bytes(),
         )
 
-    def test_build_image_plan_stages_deferred_libxml_packages_in_aggregate_image(self) -> None:
+    def test_build_image_plan_keeps_aggregate_metadata_contract_without_install_groups(self) -> None:
         lock_data = copy.deepcopy(self.lock_data)
         lock_data["libraries"][0]["library"] = "libxml"
         lock_data["libraries"][1]["library"] = "omega"
@@ -155,15 +161,12 @@ class BuildImagesTests(TestCase):
             requested_libraries=[],
         )
 
-        self.assertEqual(
-            [
-                {"name": "primary", "packages": ["libgamma1", "libdelta1"]},
-                {"name": "deferred", "packages": ["libalpha1"]},
-            ],
-            plan["images"][-1]["install_groups"],
-        )
+        self.assertNotIn("install_groups", plan["images"][-1])
+        self.assertEqual(["libalpha1", "libgamma1", "libdelta1"], [
+            package["package"] for package in plan["images"][-1]["packages"]
+        ])
 
-    def test_prepare_context_writes_staged_aggregate_dockerfile(self) -> None:
+    def test_prepare_context_keeps_single_debs_directory_for_aggregate_image(self) -> None:
         lock_data = self._materialize_locked_debs(self.lock_data)
         lock_data["libraries"][0]["library"] = "libxml"
         lock_data["libraries"][1]["library"] = "omega"
@@ -176,15 +179,36 @@ class BuildImagesTests(TestCase):
 
         context_dir = prepare_context(plan["images"][-1], self.temp_root / "contexts")
 
-        self.assertTrue((context_dir / "debs-01-primary").is_dir())
-        self.assertTrue((context_dir / "debs-02-deferred").is_dir())
+        self.assertTrue((context_dir / "debs").is_dir())
+        self.assertFalse((context_dir / "debs-01-primary").exists())
+        self.assertFalse((context_dir / "debs-02-deferred").exists())
         dockerfile = (context_dir / "Dockerfile").read_text(encoding="utf-8")
+        self.assertEqual(render_dockerfile("ubuntu:24.04"), dockerfile)
+
+    def test_internal_staged_context_is_available_only_for_runtime_aggregate_builds(self) -> None:
+        lock_data = self._materialize_locked_debs(self.lock_data)
+        lock_data["libraries"][0]["library"] = "libxml"
+        lock_data["libraries"][0]["port_debs"][0]["package"] = "libxml2"
+        lock_data["libraries"][1]["library"] = "omega"
+        plan = build_image_plan(
+            lock_data,
+            image_namespace="safelibs",
+            base_image="ubuntu:24.04",
+            requested_libraries=[],
+        )
+        aggregate_image = plan["images"][-1]
+
+        self.assertTrue(_requires_staged_aggregate_build(aggregate_image))
+        staged_context_dir = _prepare_staged_aggregate_context(
+            aggregate_image,
+            self.temp_root / "staged",
+        )
+
+        self.assertTrue((staged_context_dir / "debs-01-primary").is_dir())
+        self.assertTrue((staged_context_dir / "debs-02-deferred").is_dir())
+        dockerfile = (staged_context_dir / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("COPY debs-01-primary/ /tmp/debs-01-primary/", dockerfile)
         self.assertIn("COPY debs-02-deferred/ /tmp/debs-02-deferred/", dockerfile)
-        self.assertIn(
-            "/tmp/debs-02-deferred/*.deb && rm -rf /var/lib/apt/lists/* /tmp/debs-02-deferred",
-            dockerfile,
-        )
 
     def test_build_image_plan_rejects_base_image_mismatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "BASE_IMAGE"):

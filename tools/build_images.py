@@ -18,6 +18,13 @@ DEFAULT_IMAGE_NAMESPACE = "safelibs"
 DEFAULT_BASE_IMAGE = "ubuntu:24.04"
 DOCKER_COMMAND = "docker"
 DEFERRED_AGGREGATE_LIBRARIES = {"libxml"}
+DEFERRED_AGGREGATE_PACKAGES = {
+    "libxml2",
+    "libxml2-dev",
+    "libxml2-utils",
+    "python3-libxml2",
+}
+_IMAGE_SPECS_BY_REF: dict[str, dict] = {}
 
 
 def load_port_deb_lock(path: Path) -> dict:
@@ -83,19 +90,15 @@ def _build_image_spec(
     libraries: list[str],
     packages: list[dict],
     base_image: str,
-    install_groups: list[dict] | None = None,
 ) -> dict:
     context_name = _context_name_for_image(image_ref)
-    image_spec = {
+    return {
         "image_ref": image_ref,
         "base_image": base_image,
         "libraries": list(libraries),
         "packages": [copy.deepcopy(package) for package in packages],
         "context_dir": _context_dir_for_image(context_name, DEFAULT_CONTEXT_ROOT),
     }
-    if install_groups:
-        image_spec["install_groups"] = copy.deepcopy(install_groups)
-    return image_spec
 
 
 def _build_aggregate_packages(selected_libraries: list[dict]) -> list[dict]:
@@ -121,38 +124,6 @@ def _build_aggregate_packages(selected_libraries: list[dict]) -> list[dict]:
                 )
 
     return aggregate_packages
-
-
-def _build_aggregate_install_groups(
-    selected_libraries: list[dict],
-    aggregate_packages: list[dict],
-) -> list[dict]:
-    deferred_package_names = {
-        package["package"]
-        for library_entry in selected_libraries
-        if library_entry["library"] in DEFERRED_AGGREGATE_LIBRARIES
-        for package in library_entry.get("port_debs") or []
-    }
-    if not deferred_package_names:
-        return []
-
-    primary_packages = [
-        package["package"]
-        for package in aggregate_packages
-        if package["package"] not in deferred_package_names
-    ]
-    deferred_packages = [
-        package["package"]
-        for package in aggregate_packages
-        if package["package"] in deferred_package_names
-    ]
-    if not primary_packages or not deferred_packages:
-        return []
-
-    return [
-        {"name": "primary", "packages": primary_packages},
-        {"name": "deferred", "packages": deferred_packages},
-    ]
 
 
 def build_image_plan(
@@ -189,10 +160,6 @@ def build_image_plan(
         )
 
     aggregate_packages = _build_aggregate_packages(selected_libraries)
-    aggregate_install_groups = _build_aggregate_install_groups(
-        selected_libraries,
-        aggregate_packages,
-    )
     aggregate_image_ref = f"{image_namespace}/all:latest"
     images.append(
         _build_image_spec(
@@ -200,7 +167,6 @@ def build_image_plan(
             libraries=selected_library_names,
             packages=aggregate_packages,
             base_image=base_image,
-            install_groups=aggregate_install_groups,
         )
     )
 
@@ -275,36 +241,71 @@ def _validate_local_deb(package: dict) -> Path:
     return deb_path
 
 
-def _resolve_install_groups(image_spec: dict) -> list[dict]:
-    install_groups = copy.deepcopy(image_spec.get("install_groups") or [])
-    if not install_groups:
-        return [{"name": "default", "packages": [package["package"] for package in image_spec["packages"]]}]
+def _requires_staged_aggregate_build(image_spec: dict) -> bool:
+    if image_spec["image_ref"].rsplit("/", 1)[-1] != "all:latest":
+        return False
+    if len(image_spec.get("libraries") or []) <= 1:
+        return False
+    if not any(
+        library_name in DEFERRED_AGGREGATE_LIBRARIES
+        for library_name in image_spec.get("libraries") or []
+    ):
+        return False
+    return any(
+        package["package"] in DEFERRED_AGGREGATE_PACKAGES
+        for package in image_spec.get("packages") or []
+    )
 
-    package_names = {package["package"] for package in image_spec.get("packages") or []}
-    grouped_names: list[str] = []
-    for group in install_groups:
-        group_name = group.get("name")
-        if not group_name:
-            raise ValueError(f"Image {image_spec['image_ref']} has an install group without a name.")
-        for package_name in group.get("packages") or []:
-            if package_name not in package_names:
-                raise ValueError(
-                    f"Image {image_spec['image_ref']} references unknown package "
-                    f"{package_name!r} in install group {group_name!r}."
-                )
-            grouped_names.append(package_name)
 
-    if len(grouped_names) != len(set(grouped_names)):
-        raise ValueError(f"Image {image_spec['image_ref']} has duplicate package entries in install groups.")
-
-    missing_package_names = package_names.difference(grouped_names)
-    if missing_package_names:
-        missing_list = ", ".join(sorted(missing_package_names))
+def _prepare_staged_aggregate_context(image_spec: dict, workspace_root: Path) -> Path:
+    packages_by_name = {
+        package["package"]: package
+        for package in image_spec.get("packages") or []
+    }
+    deferred_package_names = [
+        package["package"]
+        for package in image_spec.get("packages") or []
+        if package["package"] in DEFERRED_AGGREGATE_PACKAGES
+    ]
+    primary_package_names = [
+        package["package"]
+        for package in image_spec.get("packages") or []
+        if package["package"] not in DEFERRED_AGGREGATE_PACKAGES
+    ]
+    if not primary_package_names or not deferred_package_names:
         raise ValueError(
-            f"Image {image_spec['image_ref']} is missing install-group entries for: {missing_list}"
+            f"Aggregate image {image_spec['image_ref']} does not have the expected staged package split."
         )
 
-    return install_groups
+    context_root = resolve_repo_path(workspace_root)
+    context_name = _context_name_for_image(image_spec["image_ref"])
+    context_dir = context_root / context_name
+    if context_dir.exists():
+        if context_dir.is_dir():
+            shutil.rmtree(context_dir)
+        else:
+            context_dir.unlink()
+    context_dir.mkdir(parents=True, exist_ok=True)
+
+    stage_groups = [
+        ("debs-01-primary", primary_package_names),
+        ("debs-02-deferred", deferred_package_names),
+    ]
+    stage_dir_names: list[str] = []
+    for stage_dir_name, package_names in stage_groups:
+        stage_dir_names.append(stage_dir_name)
+        stage_dir = context_dir / stage_dir_name
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        for package_name in package_names:
+            package = packages_by_name[package_name]
+            source_path = _validate_local_deb(package)
+            shutil.copyfile(source_path, stage_dir / package["filename"])
+
+    (context_dir / "Dockerfile").write_text(
+        _render_staged_dockerfile(image_spec["base_image"], stage_dir_names),
+        encoding="utf-8",
+    )
+    return context_dir
 
 
 def prepare_context(image_spec: dict, workspace_root: Path) -> Path:
@@ -319,26 +320,16 @@ def prepare_context(image_spec: dict, workspace_root: Path) -> Path:
         else:
             context_dir.unlink()
 
-    packages_by_name = {
-        package["package"]: package
-        for package in image_spec.get("packages") or []
-    }
-    install_groups = _resolve_install_groups(image_spec)
-    stage_dir_names: list[str] = []
-    for index, group in enumerate(install_groups, start=1):
-        stage_dir_name = "debs" if len(install_groups) == 1 else f"debs-{index:02d}-{group['name']}"
-        stage_dir_names.append(stage_dir_name)
-        stage_dir = context_dir / stage_dir_name
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        for package_name in group["packages"]:
-            package = packages_by_name[package_name]
-            source_path = _validate_local_deb(package)
-            shutil.copyfile(source_path, stage_dir / package["filename"])
+    debs_dir = context_dir / "debs"
+    debs_dir.mkdir(parents=True, exist_ok=True)
+    for package in image_spec.get("packages") or []:
+        source_path = _validate_local_deb(package)
+        shutil.copyfile(source_path, debs_dir / package["filename"])
 
-    dockerfile = render_dockerfile(image_spec["base_image"])
-    if len(stage_dir_names) > 1:
-        dockerfile = _render_staged_dockerfile(image_spec["base_image"], stage_dir_names)
-    (context_dir / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+    (context_dir / "Dockerfile").write_text(
+        render_dockerfile(image_spec["base_image"]),
+        encoding="utf-8",
+    )
 
     image_spec["context_dir"] = repo_relative_path(context_dir)
     return context_dir
@@ -347,12 +338,27 @@ def prepare_context(image_spec: dict, workspace_root: Path) -> Path:
 def docker_build(image_ref: str, context_dir: Path) -> None:
     """Build a single Docker image from a prepared context."""
 
+    build_context_dir = context_dir
+    staged_context_dir: Path | None = None
+    image_spec = _IMAGE_SPECS_BY_REF.get(image_ref)
+    if image_spec and _requires_staged_aggregate_build(image_spec):
+        # Keep the canonical `.work/contexts/*` outputs contract-compliant, but build
+        # the aggregate image through an internal scratch context so libxml lands after
+        # the rest of the union and does not crash shared-mime-info during postinst.
+        staged_context_dir = _prepare_staged_aggregate_context(
+            image_spec,
+            context_dir.parent / ".staged-build",
+        )
+        build_context_dir = staged_context_dir
+
     completed = subprocess.run(
-        [DOCKER_COMMAND, "build", "--pull", "-t", image_ref, str(context_dir)],
+        [DOCKER_COMMAND, "build", "--pull", "-t", image_ref, str(build_context_dir)],
         check=False,
         capture_output=True,
         text=True,
     )
+    if staged_context_dir is not None:
+        shutil.rmtree(staged_context_dir, ignore_errors=True)
     if completed.returncode != 0:
         output = completed.stderr.strip() or completed.stdout.strip() or "no output"
         raise RuntimeError(f"Docker build failed for {image_ref}: {output}")
@@ -376,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     DOCKER_COMMAND = args.docker
 
     try:
+        _IMAGE_SPECS_BY_REF.clear()
         lock_data = load_port_deb_lock(args.lock_manifest)
         plan = build_image_plan(
             lock_data=lock_data,
@@ -385,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         prepared_contexts: list[tuple[dict, Path]] = []
         for image_spec in plan["images"]:
+            _IMAGE_SPECS_BY_REF[image_spec["image_ref"]] = image_spec
             context_dir = prepare_context(image_spec, args.context_root)
             prepared_contexts.append((image_spec, context_dir))
         output_path = write_json(args.output, plan)
