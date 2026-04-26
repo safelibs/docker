@@ -1,0 +1,111 @@
+{
+  "site_url": "https://example.test/validator/site-data.json",
+  "schema_version": 2,
+  "proof_version": "2026.04.25",
+  "selected_mode": "port-04-test",
+  "suite": {
+    "name": "ubuntu-24.04",
+    "apt_suite": "noble",
+    "image": "ubuntu:24.04"
+  },
+  "proof_totals": {
+    "libraries": 4,
+    "cases": 140,
+    "source_cases": 20,
+    "usage_cases": 120,
+    "passed": 139,
+    "failed": 1,
+    "casts": 140
+  },
+  "selection_scope": "full",
+  "requested_libraries": [],
+  "libraries": [
+    {
+      "library": "alpha",
+      "apt_packages": [
+        "libalpha1",
+        "libalpha-dev"
+      ],
+      "totals": {
+        "cases": 35,
+        "source_cases": 5,
+        "usage_cases": 30,
+        "passed": 35,
+        "failed": 0,
+        "casts": 35
+      },
+      "port_repository": "safelibs/port-alpha",
+      "port_tag_ref": "refs/tags/alpha/04-test",
+      "port_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "port_release_tag": "build-alpha1234",
+      "port_debs": [
+        {
+          "package": "libalpha1",
+          "filename": "libalpha1_1.0-1safelibs1_amd64.deb",
+          "architecture": "amd64",
+          "sha256": "0d43c7e22abcfdd7873d630689ec547799f221ec0dd9fac81fcd1ef2a1e290f3",
+          "size": 18
+        }
+      ],
+      "unported_original_packages": []
+    },
+    {
+      "library": "gamma",
+      "apt_packages": [
+        "libgamma1"
+      ],
+      "totals": {
+        "cases": 35,
+        "source_cases": 5,
+        "usage_cases": 30,
+        "passed": 35,
+        "failed": 0,
+        "casts": 35
+      },
+      "port_repository": "safelibs/port-gamma",
+      "port_tag_ref": "refs/tags/gamma/04-test",
+      "port_commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "port_release_tag": "build-gamma1234",
+      "port_debs": [
+        {
+          "package": "libgamma1",
+          "filename": "libgamma1_2.0-1safelibs1_amd64.deb",
+          "architecture": "amd64",
+          "sha256": "8052fdcdb2acc6bfea1f618fcf1b92eace1060853202f0dab8c1d1def5d876da",
+          "size": 18
+        }
+      ],
+      "unported_original_packages": [
+        "libgamma0"
+      ]
+    },
+    {
+      "library": "delta",
+      "apt_packages": [
+        "libdelta1"
+      ],
+      "totals": {
+        "cases": 35,
+        "source_cases": 5,
+        "usage_cases": 30,
+        "passed": 35,
+        "failed": 0,
+        "casts": 35
+      },
+      "port_repository": "safelibs/port-delta",
+      "port_tag_ref": "refs/tags/delta/04-test",
+      "port_commit": "dddddddddddddddddddddddddddddddddddddddd",
+      "port_release_tag": "build-delta1234",
+      "port_debs": [
+        {
+          "package": "libdelta1",
+          "filename": "libdelta1_3.0-1safelibs1_all.deb",
+          "architecture": "all",
+          "sha256": "2cccf53e2e0ab32fce567a2a164b76fbcfdcb997287cccba3846b38fbaf484d0",
+          "size": 18
+        }
+      ],
+      "unported_original_packages": []
+    }
+  ]
+}
