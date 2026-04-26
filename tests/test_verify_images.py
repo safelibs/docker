@@ -15,6 +15,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 class VerifyImagesTests(TestCase):
     def setUp(self) -> None:
         self.plan = read_json(FIXTURES / "image-build-plan.json")
+        self.plan["base_image_id"] = "sha256:test-base"
 
     @patch("tools.verify_images.subprocess.run")
     def test_query_installed_packages_parses_dpkg_query_output(self, mock_run) -> None:
@@ -54,37 +55,62 @@ class VerifyImagesTests(TestCase):
 
         self.assertEqual({"libalpha1": "1.0-1safelibs1"}, observed)
 
+    @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
     @patch("tools.verify_images.query_installed_packages")
     def test_verify_image_requires_exact_versions(
         self,
         mock_query_installed_packages,
         mock_query_image_plan_digest,
+        mock_query_image_base_id,
     ) -> None:
         mock_query_image_plan_digest.return_value = self.plan["images"][0]["plan_digest"]
+        mock_query_image_base_id.return_value = self.plan["base_image_id"]
         mock_query_installed_packages.return_value = {"libalpha1": "1.0-1wrong"}
 
         with self.assertRaisesRegex(ValueError, "expected 1.0-1safelibs1 observed 1.0-1wrong"):
-            verify_image(self.plan["images"][0])
+            verify_image(self.plan["images"][0], expected_base_image_id=self.plan["base_image_id"])
 
+    @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
-    def test_verify_image_rejects_plan_digest_mismatch(self, mock_query_image_plan_digest) -> None:
+    def test_verify_image_rejects_plan_digest_mismatch(
+        self,
+        mock_query_image_plan_digest,
+        mock_query_image_base_id,
+    ) -> None:
         mock_query_image_plan_digest.return_value = "different-plan-digest"
+        mock_query_image_base_id.return_value = self.plan["base_image_id"]
 
         with self.assertRaisesRegex(ValueError, "plan digest"):
-            verify_image(self.plan["images"][0], require_plan_digest_match=True)
+            verify_image(self.plan["images"][0], expected_base_image_id=self.plan["base_image_id"])
 
+    @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
     @patch("tools.verify_images.query_installed_packages")
     def test_verify_image_checks_expected_packages_after_plan_digest(
         self,
         mock_query_installed_packages,
         mock_query_image_plan_digest,
+        mock_query_image_base_id,
     ) -> None:
         mock_query_image_plan_digest.return_value = self.plan["images"][0]["plan_digest"]
+        mock_query_image_base_id.return_value = self.plan["base_image_id"]
         mock_query_installed_packages.return_value = {"libalpha1": "1.0-1safelibs1"}
 
-        verify_image(self.plan["images"][0], require_plan_digest_match=True)
+        verify_image(self.plan["images"][0], expected_base_image_id=self.plan["base_image_id"])
+
+    @patch("tools.verify_images._query_image_base_id")
+    @patch("tools.verify_images._query_image_plan_digest")
+    def test_verify_image_rejects_base_image_id_mismatch(
+        self,
+        mock_query_image_plan_digest,
+        mock_query_image_base_id,
+    ) -> None:
+        mock_query_image_plan_digest.return_value = self.plan["images"][0]["plan_digest"]
+        mock_query_image_base_id.return_value = "sha256:stale-base"
+
+        with self.assertRaisesRegex(ValueError, "base image id"):
+            verify_image(self.plan["images"][0], expected_base_image_id=self.plan["base_image_id"])
 
     @patch("tools.verify_images.verify_image")
     def test_verify_build_plan_checks_filtered_request_metadata(self, mock_verify_image) -> None:
@@ -104,12 +130,14 @@ class VerifyImagesTests(TestCase):
 
         self.assertEqual(3, mock_verify_image.call_count)
 
+    @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
     @patch("tools.verify_images.query_installed_packages")
     def test_verify_build_plan_rejects_filtered_aggregate_scope_mismatch(
         self,
         mock_query_installed_packages,
         mock_query_image_plan_digest,
+        mock_query_image_base_id,
     ) -> None:
         filtered_plan = copy.deepcopy(self.plan)
         filtered_plan["selection_scope"] = "filtered"
@@ -148,6 +176,7 @@ class VerifyImagesTests(TestCase):
                     return image_spec["plan_digest"]
             raise AssertionError(f"unexpected image_ref {image_ref}")
 
+        mock_query_image_base_id.return_value = self.plan["base_image_id"]
         mock_query_installed_packages.side_effect = fake_query
         mock_query_image_plan_digest.side_effect = fake_digest
 

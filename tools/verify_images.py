@@ -13,6 +13,7 @@ from . import read_json
 DEFAULT_IMAGE_BUILD_PLAN = Path("dist/image-build-plan.json")
 DOCKER_COMMAND = "docker"
 PLAN_DIGEST_LABEL = "org.safelibs.image-plan-digest"
+BASE_IMAGE_ID_LABEL = "org.safelibs.base-image-id"
 
 
 def load_image_build_plan(path: Path) -> dict:
@@ -68,8 +69,8 @@ def _dpkg_query_reports_only_missing_packages(stderr: str) -> bool:
     return bool(stderr_lines) and all("no packages found matching" in line for line in stderr_lines)
 
 
-def _query_image_plan_digest(image_ref: str) -> str | None:
-    format_string = "{{with .Config.Labels}}{{index . " + json.dumps(PLAN_DIGEST_LABEL) + "}}{{end}}"
+def _query_image_label(image_ref: str, label_name: str) -> str | None:
+    format_string = "{{with .Config.Labels}}{{index . " + json.dumps(label_name) + "}}{{end}}"
     completed = subprocess.run(
         [
             DOCKER_COMMAND,
@@ -92,23 +93,36 @@ def _query_image_plan_digest(image_ref: str) -> str | None:
     return observed_digest
 
 
+def _query_image_plan_digest(image_ref: str) -> str | None:
+    return _query_image_label(image_ref, PLAN_DIGEST_LABEL)
+
+
+def _query_image_base_id(image_ref: str) -> str | None:
+    return _query_image_label(image_ref, BASE_IMAGE_ID_LABEL)
+
+
 def _is_aggregate_image(image_spec: dict) -> bool:
     return image_spec["image_ref"].rsplit("/", 1)[-1] == "all:latest"
 
 
-def verify_image(image_spec: dict, *, require_plan_digest_match: bool = False) -> None:
+def verify_image(image_spec: dict, *, expected_base_image_id: str) -> None:
     """Verify exact package versions for a single built image."""
 
-    if require_plan_digest_match:
-        expected_digest = image_spec.get("plan_digest")
-        if not expected_digest:
-            raise ValueError(f"Image plan for {image_spec['image_ref']} is missing plan_digest.")
-        observed_digest = _query_image_plan_digest(image_spec["image_ref"])
-        if observed_digest != expected_digest:
-            raise ValueError(
-                f"Image {image_spec['image_ref']} has plan digest {observed_digest!r}, "
-                f"expected {expected_digest!r}"
-            )
+    expected_digest = image_spec.get("plan_digest")
+    if not expected_digest:
+        raise ValueError(f"Image plan for {image_spec['image_ref']} is missing plan_digest.")
+    observed_digest = _query_image_plan_digest(image_spec["image_ref"])
+    if observed_digest != expected_digest:
+        raise ValueError(
+            f"Image {image_spec['image_ref']} has plan digest {observed_digest!r}, "
+            f"expected {expected_digest!r}"
+        )
+    observed_base_image_id = _query_image_base_id(image_spec["image_ref"])
+    if observed_base_image_id != expected_base_image_id:
+        raise ValueError(
+            f"Image {image_spec['image_ref']} has base image id {observed_base_image_id!r}, "
+            f"expected {expected_base_image_id!r}"
+        )
 
     expected_versions = {
         package["package"]: package["version"]
@@ -169,11 +183,12 @@ def verify_build_plan(plan: dict, requested_libraries: list[str]) -> None:
     if not any(image.get("image_ref", "").rsplit("/", 1)[-1] == "all:latest" for image in images):
         raise ValueError("Image build plan is missing the aggregate all image.")
 
+    base_image_id = plan.get("base_image_id")
+    if not isinstance(base_image_id, str) or not base_image_id:
+        raise ValueError("Image build plan is missing base_image_id.")
+
     for image_spec in images:
-        verify_image(
-            image_spec,
-            require_plan_digest_match=expected_scope == "filtered" and _is_aggregate_image(image_spec),
-        )
+        verify_image(image_spec, expected_base_image_id=base_image_id)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

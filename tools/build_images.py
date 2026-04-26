@@ -21,7 +21,9 @@ DEFAULT_IMAGE_NAMESPACE = "safelibs"
 DEFAULT_BASE_IMAGE = "ubuntu:24.04"
 DOCKER_COMMAND = "docker"
 PLAN_DIGEST_LABEL = "org.safelibs.image-plan-digest"
+BASE_IMAGE_ID_LABEL = "org.safelibs.base-image-id"
 _IMAGE_PLAN_DIGESTS_BY_REF: dict[str, str] = {}
+_CURRENT_BASE_IMAGE_ID = ""
 FULL_AGGREGATE_CACHE_TAG = "full-selection-cache"
 
 
@@ -293,6 +295,17 @@ def _docker_run(
     return completed
 
 
+def _refresh_base_image(base_image: str) -> str:
+    _docker_run([DOCKER_COMMAND, "pull", base_image])
+    completed = _docker_run(
+        [DOCKER_COMMAND, "image", "inspect", "--format", "{{.Id}}", base_image]
+    )
+    base_image_id = completed.stdout.strip()
+    if not base_image_id:
+        raise ValueError(f"Docker image inspect did not return an image id for {base_image}.")
+    return base_image_id
+
+
 def _dpkg_query_reports_only_missing_packages(stderr: str) -> bool:
     stderr_lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     return bool(stderr_lines) and all("no packages found matching" in line for line in stderr_lines)
@@ -338,8 +351,8 @@ def _query_installed_packages(image_ref: str, package_names: list[str]) -> dict[
     return observed
 
 
-def _query_image_plan_digest(image_ref: str) -> str | None:
-    format_string = "{{with .Config.Labels}}{{index . " + json.dumps(PLAN_DIGEST_LABEL) + "}}{{end}}"
+def _query_image_label(image_ref: str, label_name: str) -> str | None:
+    format_string = "{{with .Config.Labels}}{{index . " + json.dumps(label_name) + "}}{{end}}"
     completed = _docker_run(
         [
             DOCKER_COMMAND,
@@ -359,6 +372,14 @@ def _query_image_plan_digest(image_ref: str) -> str | None:
     return observed_digest
 
 
+def _query_image_plan_digest(image_ref: str) -> str | None:
+    return _query_image_label(image_ref, PLAN_DIGEST_LABEL)
+
+
+def _query_image_base_id(image_ref: str) -> str | None:
+    return _query_image_label(image_ref, BASE_IMAGE_ID_LABEL)
+
+
 def _is_aggregate_image(image_spec: dict) -> bool:
     return image_spec["image_ref"].rsplit("/", 1)[-1] == "all:latest"
 
@@ -374,11 +395,13 @@ def _aggregate_cache_image_spec(image_spec: dict) -> dict:
     return cache_image_spec
 
 
-def _local_image_matches(image_spec: dict, *, require_plan_digest_match: bool) -> bool:
+def _local_image_matches(image_spec: dict) -> bool:
     image_ref = image_spec["image_ref"]
     if not _local_image_exists(image_ref):
         return False
-    if require_plan_digest_match and _query_image_plan_digest(image_ref) != image_spec.get("plan_digest"):
+    if _query_image_plan_digest(image_ref) != image_spec.get("plan_digest"):
+        return False
+    if _query_image_base_id(image_ref) != _CURRENT_BASE_IMAGE_ID:
         return False
 
     expected_versions = {
@@ -397,14 +420,14 @@ def _docker_tag(source_ref: str, target_ref: str) -> None:
 
 def _preserve_full_aggregate_cache(image_spec: dict) -> None:
     cache_image_spec = _aggregate_cache_image_spec(image_spec)
-    if _local_image_matches(cache_image_spec, require_plan_digest_match=False):
+    if _local_image_matches(cache_image_spec):
         return
     _docker_tag(image_spec["image_ref"], cache_image_spec["image_ref"])
 
 
 def _restore_full_aggregate_from_cache(image_spec: dict) -> bool:
     cache_image_spec = _aggregate_cache_image_spec(image_spec)
-    if not _local_image_matches(cache_image_spec, require_plan_digest_match=False):
+    if not _local_image_matches(cache_image_spec):
         return False
     _docker_tag(cache_image_spec["image_ref"], image_spec["image_ref"])
     return True
@@ -416,6 +439,8 @@ def docker_build(image_ref: str, context_dir: Path) -> None:
     plan_digest = _IMAGE_PLAN_DIGESTS_BY_REF.get(image_ref)
     if not plan_digest:
         raise ValueError(f"Missing plan digest for Docker image {image_ref}.")
+    if not _CURRENT_BASE_IMAGE_ID:
+        raise ValueError(f"Missing base image id for Docker image {image_ref}.")
     _docker_run(
         [
             DOCKER_COMMAND,
@@ -423,6 +448,8 @@ def docker_build(image_ref: str, context_dir: Path) -> None:
             "--pull",
             "--label",
             f"{PLAN_DIGEST_LABEL}={plan_digest}",
+            "--label",
+            f"{BASE_IMAGE_ID_LABEL}={_CURRENT_BASE_IMAGE_ID}",
             "-t",
             image_ref,
             str(context_dir),
@@ -445,11 +472,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    global DOCKER_COMMAND
+    global DOCKER_COMMAND, _CURRENT_BASE_IMAGE_ID
     DOCKER_COMMAND = args.docker
 
     try:
         _IMAGE_PLAN_DIGESTS_BY_REF.clear()
+        _CURRENT_BASE_IMAGE_ID = _refresh_base_image(args.base_image)
         lock_data = load_port_deb_lock(args.lock_manifest)
         plan = build_image_plan(
             lock_data=lock_data,
@@ -457,21 +485,16 @@ def main(argv: list[str] | None = None) -> int:
             base_image=args.base_image,
             requested_libraries=args.libraries,
         )
+        plan["base_image_id"] = _CURRENT_BASE_IMAGE_ID
         full_aggregate_spec = build_image_plan(
             lock_data=lock_data,
             image_namespace=args.image_namespace,
             base_image=args.base_image,
             requested_libraries=[],
         )["images"][-1]
-        if plan["selection_scope"] == "filtered" and _local_image_matches(
-            full_aggregate_spec,
-            require_plan_digest_match=False,
-        ):
+        if plan["selection_scope"] == "filtered" and _local_image_matches(full_aggregate_spec):
             _preserve_full_aggregate_cache(full_aggregate_spec)
-        elif plan["selection_scope"] == "full" and not _local_image_matches(
-            full_aggregate_spec,
-            require_plan_digest_match=False,
-        ):
+        elif plan["selection_scope"] == "full" and not _local_image_matches(full_aggregate_spec):
             _restore_full_aggregate_from_cache(full_aggregate_spec)
         prepared_contexts: list[tuple[dict, Path]] = []
         for image_spec in plan["images"]:
@@ -481,20 +504,11 @@ def main(argv: list[str] | None = None) -> int:
         output_path = write_json(args.output, plan)
         built_images = 0
         for image_spec, context_dir in prepared_contexts:
-            require_plan_digest_match = plan["selection_scope"] == "filtered" and _is_aggregate_image(
-                image_spec
-            )
-            if _local_image_matches(
-                image_spec,
-                require_plan_digest_match=require_plan_digest_match,
-            ):
+            if _local_image_matches(image_spec):
                 continue
             docker_build(image_spec["image_ref"], context_dir)
             built_images += 1
-        if plan["selection_scope"] == "full" and _local_image_matches(
-            full_aggregate_spec,
-            require_plan_digest_match=False,
-        ):
+        if plan["selection_scope"] == "full" and _local_image_matches(full_aggregate_spec):
             _preserve_full_aggregate_cache(full_aggregate_spec)
     except Exception as exc:  # pragma: no cover - CLI surface
         print(f"error: {exc}", file=sys.stderr)

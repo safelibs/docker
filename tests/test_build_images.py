@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from tools import ensure_directory, read_json, repo_relative_path, repo_root
 from tools.build_images import (
+    BASE_IMAGE_ID_LABEL,
     PLAN_DIGEST_LABEL,
     _IMAGE_PLAN_DIGESTS_BY_REF,
     _aggregate_cache_image_ref,
@@ -199,7 +200,10 @@ class BuildImagesTests(TestCase):
             _IMAGE_PLAN_DIGESTS_BY_REF,
             {"safelibs/all:latest": "digest-all"},
             clear=True,
-        ), patch("tools.build_images._docker_run") as mock_docker_run:
+        ), patch("tools.build_images._docker_run") as mock_docker_run, patch(
+            "tools.build_images._CURRENT_BASE_IMAGE_ID",
+            "sha256:test-base",
+        ):
             docker_build("safelibs/all:latest", context_dir)
 
         mock_docker_run.assert_called_once_with(
@@ -209,6 +213,8 @@ class BuildImagesTests(TestCase):
                 "--pull",
                 "--label",
                 f"{PLAN_DIGEST_LABEL}=digest-all",
+                "--label",
+                f"{BASE_IMAGE_ID_LABEL}=sha256:test-base",
                 "-t",
                 "safelibs/all:latest",
                 str(context_dir),
@@ -216,6 +222,7 @@ class BuildImagesTests(TestCase):
             env={"DOCKER_BUILDKIT": "0"},
         )
 
+    @patch("tools.build_images._query_image_base_id")
     @patch("tools.build_images._query_image_plan_digest")
     @patch("tools.build_images._query_installed_packages")
     @patch("tools.build_images._local_image_exists")
@@ -224,9 +231,11 @@ class BuildImagesTests(TestCase):
         mock_local_image_exists,
         mock_query_installed_packages,
         mock_query_image_plan_digest,
+        mock_query_image_base_id,
     ) -> None:
         mock_local_image_exists.return_value = True
         mock_query_image_plan_digest.return_value = "full-plan-digest"
+        mock_query_image_base_id.return_value = "sha256:test-base"
         mock_query_installed_packages.return_value = {
             "libalpha1": "1.0-1safelibs1",
             "libdelta1": "3.0-1safelibs1",
@@ -240,8 +249,10 @@ class BuildImagesTests(TestCase):
             ],
         }
 
-        self.assertFalse(_local_image_matches(image_spec, require_plan_digest_match=True))
+        with patch("tools.build_images._CURRENT_BASE_IMAGE_ID", "sha256:test-base"):
+            self.assertFalse(_local_image_matches(image_spec))
 
+    @patch("tools.build_images._query_image_base_id")
     @patch("tools.build_images._query_image_plan_digest")
     @patch("tools.build_images._query_installed_packages")
     @patch("tools.build_images._local_image_exists")
@@ -250,9 +261,11 @@ class BuildImagesTests(TestCase):
         mock_local_image_exists,
         mock_query_installed_packages,
         mock_query_image_plan_digest,
+        mock_query_image_base_id,
     ) -> None:
         mock_local_image_exists.return_value = True
         mock_query_image_plan_digest.return_value = "matching-plan-digest"
+        mock_query_image_base_id.return_value = "sha256:test-base"
         mock_query_installed_packages.return_value = {
             "libalpha1": "1.0-1safelibs1",
         }
@@ -264,7 +277,34 @@ class BuildImagesTests(TestCase):
             ],
         }
 
-        self.assertTrue(_local_image_matches(image_spec, require_plan_digest_match=True))
+        with patch("tools.build_images._CURRENT_BASE_IMAGE_ID", "sha256:test-base"):
+            self.assertTrue(_local_image_matches(image_spec))
+
+    @patch("tools.build_images._query_image_base_id")
+    @patch("tools.build_images._query_image_plan_digest")
+    @patch("tools.build_images._query_installed_packages")
+    @patch("tools.build_images._local_image_exists")
+    def test_local_image_match_rejects_base_image_id_mismatch(
+        self,
+        mock_local_image_exists,
+        mock_query_installed_packages,
+        mock_query_image_plan_digest,
+        mock_query_image_base_id,
+    ) -> None:
+        mock_local_image_exists.return_value = True
+        mock_query_image_plan_digest.return_value = "matching-plan-digest"
+        mock_query_image_base_id.return_value = "sha256:stale-base"
+        mock_query_installed_packages.return_value = {"libalpha1": "1.0-1safelibs1"}
+        image_spec = {
+            "image_ref": "safelibs/alpha:latest",
+            "plan_digest": "matching-plan-digest",
+            "packages": [
+                {"package": "libalpha1", "version": "1.0-1safelibs1"},
+            ],
+        }
+
+        with patch("tools.build_images._CURRENT_BASE_IMAGE_ID", "sha256:test-base"):
+            self.assertFalse(_local_image_matches(image_spec))
 
     def test_build_image_plan_rejects_base_image_mismatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "BASE_IMAGE"):
