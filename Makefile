@@ -14,7 +14,7 @@ DOCKER ?= docker
 LIBRARIES ?=
 VERIFY_ROOT ?= $(WORKSPACE)/verify
 
-.PHONY: test check clean resolve-validator fetch-port-debs build-images verify-images
+.PHONY: test check clean resolve-validator fetch-port-debs build-images verify-images publish-images
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v
@@ -33,6 +33,9 @@ build-images:
 
 verify-images:
 	$(PYTHON) -m tools.verify_images --image-build-plan "$(IMAGE_BUILD_PLAN)" --docker "$(DOCKER)" $(foreach library,$(LIBRARIES),--library "$(library)")
+
+publish-images:
+	$(PYTHON) -m tools.publish_images --image-build-plan "$(IMAGE_BUILD_PLAN)" --docker "$(DOCKER)"
 
 clean:
 	rm -rf $(WORKSPACE) $(DIST)

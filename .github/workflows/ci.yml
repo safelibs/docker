@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      push_images:
+        description: "Push verified images to Docker Hub."
+        required: false
+        default: false
+        type: boolean
+      libraries:
+        description: "Optional space-delimited subset for a dry-run build."
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: safelibs-docker-latest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compute should_push and normalize libraries
+        id: flags
+        shell: bash
+        env:
+          PUSH_IMAGES_INPUT: ${{ github.event.inputs.push_images || '' }}
+          LIBRARIES_INPUT: ${{ github.event.inputs.libraries || '' }}
+        run: |
+          normalized_libraries="$(python3 - <<'PY'
+          import os
+          print(" ".join(os.environ["LIBRARIES_INPUT"].split()))
+          PY
+          )"
+
+          should_push=false
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            should_push=true
+          elif [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            should_push=true
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${PUSH_IMAGES_INPUT}" == "true" ]]; then
+            should_push=true
+          fi
+
+          {
+            echo "should_push=${should_push}"
+            echo "libraries=${normalized_libraries}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Validate manual publish contract
+        shell: bash
+        env:
+          SHOULD_PUSH: ${{ steps.flags.outputs.should_push }}
+          NORMALIZED_LIBRARIES: ${{ steps.flags.outputs.libraries }}
+        run: |
+          if [[ "${SHOULD_PUSH}" != "true" ]]; then
+            exit 0
+          fi
+
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Refusing publish: publish runs are only allowed from refs/heads/main." >&2
+            exit 1
+          fi
+
+          if [[ -n "${NORMALIZED_LIBRARIES}" ]]; then
+            echo "Refusing publish: subset runs are dry-run only; libraries must be empty when publish is enabled." >&2
+            exit 1
+          fi
+
+      - name: Run make test
+        run: make test
+
+      - name: Run make resolve-validator
+        env:
+          LIBRARIES: ${{ steps.flags.outputs.libraries }}
+        run: make resolve-validator
+
+      - name: Run make fetch-port-debs
+        env:
+          LIBRARIES: ${{ steps.flags.outputs.libraries }}
+        run: make fetch-port-debs
+
+      - name: Run make build-images
+        env:
+          LIBRARIES: ${{ steps.flags.outputs.libraries }}
+        run: make build-images
+
+      - name: Run make verify-images
+        env:
+          LIBRARIES: ${{ steps.flags.outputs.libraries }}
+        run: make verify-images
+
+      - name: Validate Docker Hub secrets
+        if: ${{ steps.flags.outputs.should_push == 'true' }}
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [[ -z "${DOCKERHUB_USERNAME}" ]]; then
+            echo "Missing required secret DOCKERHUB_USERNAME for publish-enabled workflow run." >&2
+            exit 1
+          fi
+
+          if [[ -z "${DOCKERHUB_TOKEN}" ]]; then
+            echo "Missing required secret DOCKERHUB_TOKEN for publish-enabled workflow run." >&2
+            exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        if: ${{ steps.flags.outputs.should_push == 'true' }}
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          printf '%s' "${DOCKERHUB_TOKEN}" | docker login --username "${DOCKERHUB_USERNAME}" --password-stdin
+
+      - name: Run make publish-images
+        if: ${{ steps.flags.outputs.should_push == 'true' }}
+        run: make publish-images
+
+      - name: Upload dist artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.run_id }}
+          path: dist/
