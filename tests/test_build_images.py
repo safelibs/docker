@@ -10,7 +10,10 @@ from tools import ensure_directory, read_json, repo_relative_path, repo_root
 from tools.build_images import (
     PLAN_DIGEST_LABEL,
     _IMAGE_PLAN_DIGESTS_BY_REF,
+    _aggregate_cache_image_ref,
     _local_image_matches,
+    _preserve_full_aggregate_cache,
+    _restore_full_aggregate_from_cache,
     build_image_plan,
     docker_build,
     prepare_context,
@@ -271,3 +274,44 @@ class BuildImagesTests(TestCase):
                 base_image="ubuntu:22.04",
                 requested_libraries=[],
             )
+
+    @patch("tools.build_images._docker_tag")
+    @patch("tools.build_images._local_image_matches")
+    def test_preserve_full_aggregate_cache_tags_latest_when_cache_missing(
+        self,
+        mock_local_image_matches,
+        mock_docker_tag,
+    ) -> None:
+        image_spec = {
+            "image_ref": "safelibs/all:latest",
+            "packages": [],
+        }
+        mock_local_image_matches.return_value = False
+
+        _preserve_full_aggregate_cache(image_spec)
+
+        mock_docker_tag.assert_called_once_with(
+            "safelibs/all:latest",
+            _aggregate_cache_image_ref("safelibs/all:latest"),
+        )
+
+    @patch("tools.build_images._docker_tag")
+    @patch("tools.build_images._local_image_matches")
+    def test_restore_full_aggregate_from_cache_retags_latest(
+        self,
+        mock_local_image_matches,
+        mock_docker_tag,
+    ) -> None:
+        image_spec = {
+            "image_ref": "safelibs/all:latest",
+            "packages": [],
+        }
+        mock_local_image_matches.return_value = True
+
+        restored = _restore_full_aggregate_from_cache(image_spec)
+
+        self.assertTrue(restored)
+        mock_docker_tag.assert_called_once_with(
+            _aggregate_cache_image_ref("safelibs/all:latest"),
+            "safelibs/all:latest",
+        )

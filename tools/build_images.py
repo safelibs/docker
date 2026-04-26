@@ -22,6 +22,7 @@ DEFAULT_BASE_IMAGE = "ubuntu:24.04"
 DOCKER_COMMAND = "docker"
 PLAN_DIGEST_LABEL = "org.safelibs.image-plan-digest"
 _IMAGE_PLAN_DIGESTS_BY_REF: dict[str, str] = {}
+FULL_AGGREGATE_CACHE_TAG = "full-selection-cache"
 
 
 def load_port_deb_lock(path: Path) -> dict:
@@ -362,6 +363,17 @@ def _is_aggregate_image(image_spec: dict) -> bool:
     return image_spec["image_ref"].rsplit("/", 1)[-1] == "all:latest"
 
 
+def _aggregate_cache_image_ref(image_ref: str) -> str:
+    namespace = image_ref.rsplit("/", 1)[0]
+    return f"{namespace}/all:{FULL_AGGREGATE_CACHE_TAG}"
+
+
+def _aggregate_cache_image_spec(image_spec: dict) -> dict:
+    cache_image_spec = copy.deepcopy(image_spec)
+    cache_image_spec["image_ref"] = _aggregate_cache_image_ref(image_spec["image_ref"])
+    return cache_image_spec
+
+
 def _local_image_matches(image_spec: dict, *, require_plan_digest_match: bool) -> bool:
     image_ref = image_spec["image_ref"]
     if not _local_image_exists(image_ref):
@@ -377,6 +389,25 @@ def _local_image_matches(image_spec: dict, *, require_plan_digest_match: bool) -
     if observed_versions is None:
         return False
     return observed_versions == expected_versions
+
+
+def _docker_tag(source_ref: str, target_ref: str) -> None:
+    _docker_run([DOCKER_COMMAND, "tag", source_ref, target_ref])
+
+
+def _preserve_full_aggregate_cache(image_spec: dict) -> None:
+    cache_image_spec = _aggregate_cache_image_spec(image_spec)
+    if _local_image_matches(cache_image_spec, require_plan_digest_match=False):
+        return
+    _docker_tag(image_spec["image_ref"], cache_image_spec["image_ref"])
+
+
+def _restore_full_aggregate_from_cache(image_spec: dict) -> bool:
+    cache_image_spec = _aggregate_cache_image_spec(image_spec)
+    if not _local_image_matches(cache_image_spec, require_plan_digest_match=False):
+        return False
+    _docker_tag(cache_image_spec["image_ref"], image_spec["image_ref"])
+    return True
 
 
 def docker_build(image_ref: str, context_dir: Path) -> None:
@@ -426,6 +457,22 @@ def main(argv: list[str] | None = None) -> int:
             base_image=args.base_image,
             requested_libraries=args.libraries,
         )
+        full_aggregate_spec = build_image_plan(
+            lock_data=lock_data,
+            image_namespace=args.image_namespace,
+            base_image=args.base_image,
+            requested_libraries=[],
+        )["images"][-1]
+        if plan["selection_scope"] == "filtered" and _local_image_matches(
+            full_aggregate_spec,
+            require_plan_digest_match=False,
+        ):
+            _preserve_full_aggregate_cache(full_aggregate_spec)
+        elif plan["selection_scope"] == "full" and not _local_image_matches(
+            full_aggregate_spec,
+            require_plan_digest_match=False,
+        ):
+            _restore_full_aggregate_from_cache(full_aggregate_spec)
         prepared_contexts: list[tuple[dict, Path]] = []
         for image_spec in plan["images"]:
             _IMAGE_PLAN_DIGESTS_BY_REF[image_spec["image_ref"]] = image_spec["plan_digest"]
@@ -444,6 +491,11 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             docker_build(image_spec["image_ref"], context_dir)
             built_images += 1
+        if plan["selection_scope"] == "full" and _local_image_matches(
+            full_aggregate_spec,
+            require_plan_digest_match=False,
+        ):
+            _preserve_full_aggregate_cache(full_aggregate_spec)
     except Exception as exc:  # pragma: no cover - CLI surface
         print(f"error: {exc}", file=sys.stderr)
         return 1
