@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
+import shlex
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 from . import read_json, repo_relative_path, resolve_repo_path, sha256_file, write_json
@@ -17,13 +20,13 @@ DEFAULT_CONTEXT_ROOT = Path(".work/contexts")
 DEFAULT_IMAGE_NAMESPACE = "safelibs"
 DEFAULT_BASE_IMAGE = "ubuntu:24.04"
 DOCKER_COMMAND = "docker"
-DEFERRED_AGGREGATE_LIBRARIES = {"libxml"}
 DEFERRED_AGGREGATE_PACKAGES = {
     "libxml2",
     "libxml2-dev",
     "libxml2-utils",
     "python3-libxml2",
 }
+AGGREGATE_SEED_LIBRARIES = ("libwebp", "libvips")
 _IMAGE_SPECS_BY_REF: dict[str, dict] = {}
 
 
@@ -196,23 +199,6 @@ def render_dockerfile(base_image: str) -> str:
     )
 
 
-def _render_staged_dockerfile(base_image: str, stage_dir_names: list[str]) -> str:
-    lines = [f"FROM {base_image}\n"]
-    last_index = len(stage_dir_names) - 1
-    for index, stage_dir_name in enumerate(stage_dir_names):
-        lines.append(f"COPY {stage_dir_name}/ /tmp/{stage_dir_name}/\n")
-        prefix = "apt-get update && " if index == 0 else ""
-        cleanup = f"rm -rf /tmp/{stage_dir_name}"
-        if index == last_index:
-            cleanup = f"rm -rf /var/lib/apt/lists/* /tmp/{stage_dir_name}"
-        lines.append(
-            "RUN "
-            f"{prefix}DEBIAN_FRONTEND=noninteractive apt-get install -y "
-            f"--no-install-recommends /tmp/{stage_dir_name}/*.deb && {cleanup}\n"
-        )
-    return "".join(lines)
-
-
 def _validate_local_deb(package: dict) -> Path:
     local_path = package.get("local_path")
     if not local_path:
@@ -241,71 +227,15 @@ def _validate_local_deb(package: dict) -> Path:
     return deb_path
 
 
-def _requires_staged_aggregate_build(image_spec: dict) -> bool:
+def _requires_aggregate_fallback(image_spec: dict) -> bool:
     if image_spec["image_ref"].rsplit("/", 1)[-1] != "all:latest":
         return False
     if len(image_spec.get("libraries") or []) <= 1:
-        return False
-    if not any(
-        library_name in DEFERRED_AGGREGATE_LIBRARIES
-        for library_name in image_spec.get("libraries") or []
-    ):
         return False
     return any(
         package["package"] in DEFERRED_AGGREGATE_PACKAGES
         for package in image_spec.get("packages") or []
     )
-
-
-def _prepare_staged_aggregate_context(image_spec: dict, workspace_root: Path) -> Path:
-    packages_by_name = {
-        package["package"]: package
-        for package in image_spec.get("packages") or []
-    }
-    deferred_package_names = [
-        package["package"]
-        for package in image_spec.get("packages") or []
-        if package["package"] in DEFERRED_AGGREGATE_PACKAGES
-    ]
-    primary_package_names = [
-        package["package"]
-        for package in image_spec.get("packages") or []
-        if package["package"] not in DEFERRED_AGGREGATE_PACKAGES
-    ]
-    if not primary_package_names or not deferred_package_names:
-        raise ValueError(
-            f"Aggregate image {image_spec['image_ref']} does not have the expected staged package split."
-        )
-
-    context_root = resolve_repo_path(workspace_root)
-    context_name = _context_name_for_image(image_spec["image_ref"])
-    context_dir = context_root / context_name
-    if context_dir.exists():
-        if context_dir.is_dir():
-            shutil.rmtree(context_dir)
-        else:
-            context_dir.unlink()
-    context_dir.mkdir(parents=True, exist_ok=True)
-
-    stage_groups = [
-        ("debs-01-primary", primary_package_names),
-        ("debs-02-deferred", deferred_package_names),
-    ]
-    stage_dir_names: list[str] = []
-    for stage_dir_name, package_names in stage_groups:
-        stage_dir_names.append(stage_dir_name)
-        stage_dir = context_dir / stage_dir_name
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        for package_name in package_names:
-            package = packages_by_name[package_name]
-            source_path = _validate_local_deb(package)
-            shutil.copyfile(source_path, stage_dir / package["filename"])
-
-    (context_dir / "Dockerfile").write_text(
-        _render_staged_dockerfile(image_spec["base_image"], stage_dir_names),
-        encoding="utf-8",
-    )
-    return context_dir
 
 
 def prepare_context(image_spec: dict, workspace_root: Path) -> Path:
@@ -335,32 +265,191 @@ def prepare_context(image_spec: dict, workspace_root: Path) -> Path:
     return context_dir
 
 
-def docker_build(image_ref: str, context_dir: Path) -> None:
-    """Build a single Docker image from a prepared context."""
-
-    build_context_dir = context_dir
-    staged_context_dir: Path | None = None
-    image_spec = _IMAGE_SPECS_BY_REF.get(image_ref)
-    if image_spec and _requires_staged_aggregate_build(image_spec):
-        # Keep the canonical `.work/contexts/*` outputs contract-compliant, but build
-        # the aggregate image through an internal scratch context so libxml lands after
-        # the rest of the union and does not crash shared-mime-info during postinst.
-        staged_context_dir = _prepare_staged_aggregate_context(
-            image_spec,
-            context_dir.parent / ".staged-build",
-        )
-        build_context_dir = staged_context_dir
-
+def _docker_run(
+    command: list[str],
+    *,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command_env = os.environ.copy()
+    if env:
+        command_env.update(env)
     completed = subprocess.run(
-        [DOCKER_COMMAND, "build", "--pull", "-t", image_ref, str(build_context_dir)],
+        command,
         check=False,
         capture_output=True,
         text=True,
+        env=command_env,
+        timeout=timeout,
     )
-    if staged_context_dir is not None:
-        shutil.rmtree(staged_context_dir, ignore_errors=True)
+    if check and completed.returncode != 0:
+        output = completed.stderr.strip() or completed.stdout.strip() or "no output"
+        raise RuntimeError(f"Docker command failed: {' '.join(command)}: {output}")
+    return completed
+
+
+def _is_shared_mime_install_failure(output: str) -> bool:
+    return "shared-mime-info" in output and "Segmentation fault" in output
+
+
+def _split_aggregate_package_paths(image_spec: dict) -> tuple[list[str], list[str]]:
+    seed_package_names: set[str] = set()
+    seed_image_ref = _aggregate_seed_image_ref(image_spec)
+    if seed_image_ref:
+        seed_image_spec = _IMAGE_SPECS_BY_REF.get(seed_image_ref)
+        if seed_image_spec:
+            seed_package_names = {
+                package["package"]
+                for package in seed_image_spec.get("packages") or []
+            }
+
+    primary_paths: list[str] = []
+    deferred_paths: list[str] = []
+    for package in image_spec.get("packages") or []:
+        if package["package"] in seed_package_names:
+            continue
+        package_path = f"/tmp/debs/{package['filename']}"
+        if package["package"] in DEFERRED_AGGREGATE_PACKAGES:
+            deferred_paths.append(package_path)
+        else:
+            primary_paths.append(package_path)
+
+    if not deferred_paths:
+        raise ValueError(
+            f"Aggregate image {image_spec['image_ref']} does not have the expected deferred package split."
+        )
+    return primary_paths, deferred_paths
+
+
+def _aggregate_seed_image_ref(image_spec: dict) -> str | None:
+    namespace = image_spec["image_ref"].rsplit("/", 1)[0]
+    selected_libraries = set(image_spec.get("libraries") or [])
+    for library_name in AGGREGATE_SEED_LIBRARIES:
+        if library_name not in selected_libraries:
+            continue
+        seed_image_ref = f"{namespace}/{library_name}:latest"
+        if seed_image_ref == image_spec["image_ref"]:
+            continue
+        if seed_image_ref in _IMAGE_SPECS_BY_REF:
+            return seed_image_ref
+    return None
+
+
+def _build_aggregate_from_context(image_spec: dict, context_dir: Path) -> None:
+    primary_paths, deferred_paths = _split_aggregate_package_paths(image_spec)
+    seed_image_ref = _aggregate_seed_image_ref(image_spec)
+    runtime_image_ref = seed_image_ref or image_spec["base_image"]
+    container_name = f"safelibs-build-{uuid.uuid4().hex}"
+    debs_dir = context_dir / "debs"
+
+    try:
+        if seed_image_ref is None:
+            _docker_run([DOCKER_COMMAND, "pull", image_spec["base_image"]])
+        _docker_run(
+            [DOCKER_COMMAND, "run", "--name", container_name, "-d", runtime_image_ref, "sleep", "infinity"]
+        )
+        _docker_run([DOCKER_COMMAND, "exec", container_name, "mkdir", "-p", "/tmp/debs"])
+        _docker_run([DOCKER_COMMAND, "cp", f"{debs_dir}/.", f"{container_name}:/tmp/debs/"])
+
+        if primary_paths:
+            primary_install_command = (
+                "apt-get update && "
+                f"(dpkg -i {shlex.join(primary_paths)} || true) && "
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y -f "
+                "--allow-downgrades --no-install-recommends"
+            )
+            _docker_run([DOCKER_COMMAND, "exec", container_name, "bash", "-lc", primary_install_command])
+        else:
+            _docker_run([DOCKER_COMMAND, "exec", container_name, "apt-get", "update"])
+        deferred_install_command = (
+            f"(dpkg -i {shlex.join(deferred_paths)} || true) && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -f "
+            "--allow-downgrades --no-install-recommends && "
+            "rm -rf /var/lib/apt/lists/* /tmp/debs"
+        )
+        _docker_run([DOCKER_COMMAND, "exec", container_name, "bash", "-lc", deferred_install_command])
+        _docker_run([DOCKER_COMMAND, "commit", container_name, image_spec["image_ref"]])
+    finally:
+        _docker_run([DOCKER_COMMAND, "rm", "-f", container_name], check=False)
+
+
+def _local_image_exists(image_ref: str) -> bool:
+    completed = _docker_run([DOCKER_COMMAND, "image", "inspect", image_ref], check=False)
+    return completed.returncode == 0
+
+
+def _query_installed_packages(image_ref: str, package_names: list[str]) -> dict[str, str] | None:
+    if not package_names:
+        return {}
+
+    completed = _docker_run(
+        [
+            DOCKER_COMMAND,
+            "run",
+            "--rm",
+            image_ref,
+            "dpkg-query",
+            "-W",
+            "-f=${Package}\t${Version}\n",
+            *package_names,
+        ],
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+
+    observed: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            package_name, version = line.split("\t", 1)
+        except ValueError:
+            return None
+        observed[package_name] = version
+    return observed
+
+
+def _local_image_matches(image_spec: dict) -> bool:
+    image_ref = image_spec["image_ref"]
+    if not _local_image_exists(image_ref):
+        return False
+
+    expected_versions = {
+        package["package"]: package["version"]
+        for package in image_spec.get("packages") or []
+    }
+    observed_versions = _query_installed_packages(image_ref, list(expected_versions))
+    if observed_versions is None:
+        return False
+    return all(
+        observed_versions.get(package_name) == expected_version
+        for package_name, expected_version in expected_versions.items()
+    )
+
+
+def docker_build(image_ref: str, context_dir: Path) -> None:
+    """Build a single Docker image from a prepared context."""
+
+    image_spec = _IMAGE_SPECS_BY_REF.get(image_ref)
+    try:
+        completed = _docker_run(
+            [DOCKER_COMMAND, "build", "--pull", "-t", image_ref, str(context_dir)],
+            check=False,
+            env={"DOCKER_BUILDKIT": "0"},
+            timeout=90 if image_spec and _requires_aggregate_fallback(image_spec) else None,
+        )
+    except subprocess.TimeoutExpired as exc:
+        if image_spec and _requires_aggregate_fallback(image_spec):
+            _build_aggregate_from_context(image_spec, context_dir)
+            return
+        raise RuntimeError(f"Docker build timed out for {image_ref}: {exc}") from exc
     if completed.returncode != 0:
         output = completed.stderr.strip() or completed.stdout.strip() or "no output"
+        if image_spec and _requires_aggregate_fallback(image_spec) and _is_shared_mime_install_failure(output):
+            _build_aggregate_from_context(image_spec, context_dir)
+            return
         raise RuntimeError(f"Docker build failed for {image_ref}: {output}")
 
 
@@ -396,14 +485,18 @@ def main(argv: list[str] | None = None) -> int:
             context_dir = prepare_context(image_spec, args.context_root)
             prepared_contexts.append((image_spec, context_dir))
         output_path = write_json(args.output, plan)
+        built_images = 0
         for image_spec, context_dir in prepared_contexts:
+            if _local_image_matches(image_spec):
+                continue
             docker_build(image_spec["image_ref"], context_dir)
+            built_images += 1
     except Exception as exc:  # pragma: no cover - CLI surface
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     print(
-        f"Wrote {output_path} and built {len(plan['images'])} Docker images.",
+        f"Wrote {output_path} and built {built_images} Docker images.",
         file=sys.stdout,
     )
     return 0
