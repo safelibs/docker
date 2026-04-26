@@ -66,14 +66,16 @@ The CI workflow runs a single linear job on `ubuntu-24.04`:
 1. `make test`
 2. `make resolve-validator`
 3. `make fetch-port-debs`
-4. `make build-images`
-5. `make verify-images`
+4. `make build-images` on scheduled or manual runs
+5. `make verify-images` on scheduled or manual runs
 6. `make publish-images` when publishing is allowed for the event
 
-Automatic publishes happen only after verification succeeds on pushes to `main`
-and on the daily scheduled run. `workflow_dispatch` defaults to a no-push dry
-run. Manual publishes are allowed only from `main` and only when the libraries
-input is empty.
+Pushes to `main` run the lightweight validation path (`test`, validator
+selection, and `.deb` locking) so commit feedback stays fast. The full Docker
+build, verify, and publish path runs on the daily scheduled workflow and on
+`workflow_dispatch`. `workflow_dispatch` defaults to a no-push dry run. Manual
+publishes are allowed only from `main` and only when the libraries input is
+empty.
 
 The required repository secrets are exactly:
 
