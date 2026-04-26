@@ -40,7 +40,8 @@
           "local_path": ".work/debs/port-04-test/alpha/libalpha1_1.0-1safelibs1_amd64.deb"
         }
       ],
-      "context_dir": ".work/contexts/alpha"
+      "context_dir": ".work/contexts/alpha",
+      "plan_digest": "df1a93c9c5b33a1ed9aea8aa2b95b9b1ce1814a7382165e38521275dead5e77e"
     },
     {
       "image_ref": "safelibs/gamma:latest",
@@ -60,7 +61,8 @@
           "local_path": ".work/debs/port-04-test/gamma/libgamma1_2.0-1safelibs1_amd64.deb"
         }
       ],
-      "context_dir": ".work/contexts/gamma"
+      "context_dir": ".work/contexts/gamma",
+      "plan_digest": "e10f52dff1195070a66bf8f9e20ab719adb6d87add13c2d8f03694e5f0930c69"
     },
     {
       "image_ref": "safelibs/delta:latest",
@@ -80,7 +82,8 @@
           "local_path": ".work/debs/port-04-test/delta/libdelta1_3.0-1safelibs1_all.deb"
         }
       ],
-      "context_dir": ".work/contexts/delta"
+      "context_dir": ".work/contexts/delta",
+      "plan_digest": "b18e08ea61c8b3f31042e7b2b54d681e2efec0e184640736e07e5c87c342a23e"
     },
     {
       "image_ref": "safelibs/all:latest",
@@ -122,7 +125,8 @@
           "local_path": ".work/debs/port-04-test/delta/libdelta1_3.0-1safelibs1_all.deb"
         }
       ],
-      "context_dir": ".work/contexts/all"
+      "context_dir": ".work/contexts/all",
+      "plan_digest": "b7ad597e1bb21ab07dde81b2f0c0a5f036ddac3fc76499b353771a47ff64c909"
     }
   ]
 }

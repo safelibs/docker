@@ -8,6 +8,9 @@ from unittest.mock import patch
 
 from tools import ensure_directory, read_json, repo_relative_path, repo_root
 from tools.build_images import (
+    PLAN_DIGEST_LABEL,
+    _IMAGE_PLAN_DIGESTS_BY_REF,
+    _local_image_matches,
     build_image_plan,
     docker_build,
     prepare_context,
@@ -189,13 +192,76 @@ class BuildImagesTests(TestCase):
         context_dir = self.temp_root / "contexts" / "all"
         context_dir.mkdir(parents=True)
 
-        with patch("tools.build_images._docker_run") as mock_docker_run:
+        with patch.dict(
+            _IMAGE_PLAN_DIGESTS_BY_REF,
+            {"safelibs/all:latest": "digest-all"},
+            clear=True,
+        ), patch("tools.build_images._docker_run") as mock_docker_run:
             docker_build("safelibs/all:latest", context_dir)
 
         mock_docker_run.assert_called_once_with(
-            ["docker", "build", "--pull", "-t", "safelibs/all:latest", str(context_dir)],
+            [
+                "docker",
+                "build",
+                "--pull",
+                "--label",
+                f"{PLAN_DIGEST_LABEL}=digest-all",
+                "-t",
+                "safelibs/all:latest",
+                str(context_dir),
+            ],
             env={"DOCKER_BUILDKIT": "0"},
         )
+
+    @patch("tools.build_images._query_image_plan_digest")
+    @patch("tools.build_images._query_installed_packages")
+    @patch("tools.build_images._local_image_exists")
+    def test_local_image_match_rejects_plan_digest_mismatch(
+        self,
+        mock_local_image_exists,
+        mock_query_installed_packages,
+        mock_query_image_plan_digest,
+    ) -> None:
+        mock_local_image_exists.return_value = True
+        mock_query_image_plan_digest.return_value = "full-plan-digest"
+        mock_query_installed_packages.return_value = {
+            "libalpha1": "1.0-1safelibs1",
+            "libdelta1": "3.0-1safelibs1",
+        }
+        image_spec = {
+            "image_ref": "safelibs/all:latest",
+            "plan_digest": "filtered-plan-digest",
+            "packages": [
+                {"package": "libalpha1", "version": "1.0-1safelibs1"},
+                {"package": "libdelta1", "version": "3.0-1safelibs1"},
+            ],
+        }
+
+        self.assertFalse(_local_image_matches(image_spec, require_plan_digest_match=True))
+
+    @patch("tools.build_images._query_image_plan_digest")
+    @patch("tools.build_images._query_installed_packages")
+    @patch("tools.build_images._local_image_exists")
+    def test_local_image_match_accepts_matching_plan_digest_and_versions(
+        self,
+        mock_local_image_exists,
+        mock_query_installed_packages,
+        mock_query_image_plan_digest,
+    ) -> None:
+        mock_local_image_exists.return_value = True
+        mock_query_image_plan_digest.return_value = "matching-plan-digest"
+        mock_query_installed_packages.return_value = {
+            "libalpha1": "1.0-1safelibs1",
+        }
+        image_spec = {
+            "image_ref": "safelibs/alpha:latest",
+            "plan_digest": "matching-plan-digest",
+            "packages": [
+                {"package": "libalpha1", "version": "1.0-1safelibs1"},
+            ],
+        }
+
+        self.assertTrue(_local_image_matches(image_spec, require_plan_digest_match=True))
 
     def test_build_image_plan_rejects_base_image_mismatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "BASE_IMAGE"):

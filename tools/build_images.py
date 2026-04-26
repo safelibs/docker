@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -18,6 +20,8 @@ DEFAULT_CONTEXT_ROOT = Path(".work/contexts")
 DEFAULT_IMAGE_NAMESPACE = "safelibs"
 DEFAULT_BASE_IMAGE = "ubuntu:24.04"
 DOCKER_COMMAND = "docker"
+PLAN_DIGEST_LABEL = "org.safelibs.image-plan-digest"
+_IMAGE_PLAN_DIGESTS_BY_REF: dict[str, str] = {}
 
 
 def load_port_deb_lock(path: Path) -> dict:
@@ -85,13 +89,15 @@ def _build_image_spec(
     base_image: str,
 ) -> dict:
     context_name = _context_name_for_image(image_ref)
-    return {
+    image_spec = {
         "image_ref": image_ref,
         "base_image": base_image,
         "libraries": list(libraries),
         "packages": [copy.deepcopy(package) for package in packages],
         "context_dir": _context_dir_for_image(context_name, DEFAULT_CONTEXT_ROOT),
     }
+    image_spec["plan_digest"] = _image_plan_digest(image_spec)
+    return image_spec
 
 
 def _build_aggregate_packages(selected_libraries: list[dict]) -> list[dict]:
@@ -117,6 +123,26 @@ def _build_aggregate_packages(selected_libraries: list[dict]) -> list[dict]:
                 )
 
     return aggregate_packages
+
+
+def _image_plan_digest(image_spec: dict) -> str:
+    payload = {
+        "base_image": image_spec["base_image"],
+        "libraries": list(image_spec.get("libraries") or []),
+        "packages": [
+            {
+                "package": package["package"],
+                "version": package["version"],
+                "architecture": package["architecture"],
+                "filename": package["filename"],
+                "sha256": package["sha256"],
+                "size": package["size"],
+            }
+            for package in image_spec.get("packages") or []
+        ],
+    }
+    encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded_payload).hexdigest()
 
 
 def build_image_plan(
@@ -266,6 +292,11 @@ def _docker_run(
     return completed
 
 
+def _dpkg_query_reports_only_missing_packages(stderr: str) -> bool:
+    stderr_lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    return bool(stderr_lines) and all("no packages found matching" in line for line in stderr_lines)
+
+
 def _local_image_exists(image_ref: str) -> bool:
     completed = _docker_run([DOCKER_COMMAND, "image", "inspect", image_ref], check=False)
     return completed.returncode == 0
@@ -288,7 +319,10 @@ def _query_installed_packages(image_ref: str, package_names: list[str]) -> dict[
         ],
         check=False,
     )
-    if completed.returncode != 0:
+    if completed.returncode != 0 and not (
+        completed.returncode == 1
+        and _dpkg_query_reports_only_missing_packages(completed.stderr)
+    ):
         return None
 
     observed: dict[str, str] = {}
@@ -303,9 +337,36 @@ def _query_installed_packages(image_ref: str, package_names: list[str]) -> dict[
     return observed
 
 
-def _local_image_matches(image_spec: dict) -> bool:
+def _query_image_plan_digest(image_ref: str) -> str | None:
+    format_string = "{{with .Config.Labels}}{{index . " + json.dumps(PLAN_DIGEST_LABEL) + "}}{{end}}"
+    completed = _docker_run(
+        [
+            DOCKER_COMMAND,
+            "image",
+            "inspect",
+            "--format",
+            format_string,
+            image_ref,
+        ],
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    observed_digest = completed.stdout.strip()
+    if observed_digest in {"", "<no value>", "<nil>"}:
+        return None
+    return observed_digest
+
+
+def _is_aggregate_image(image_spec: dict) -> bool:
+    return image_spec["image_ref"].rsplit("/", 1)[-1] == "all:latest"
+
+
+def _local_image_matches(image_spec: dict, *, require_plan_digest_match: bool) -> bool:
     image_ref = image_spec["image_ref"]
     if not _local_image_exists(image_ref):
+        return False
+    if require_plan_digest_match and _query_image_plan_digest(image_ref) != image_spec.get("plan_digest"):
         return False
 
     expected_versions = {
@@ -315,17 +376,26 @@ def _local_image_matches(image_spec: dict) -> bool:
     observed_versions = _query_installed_packages(image_ref, list(expected_versions))
     if observed_versions is None:
         return False
-    return all(
-        observed_versions.get(package_name) == expected_version
-        for package_name, expected_version in expected_versions.items()
-    )
+    return observed_versions == expected_versions
 
 
 def docker_build(image_ref: str, context_dir: Path) -> None:
     """Build a single Docker image from a prepared context."""
 
+    plan_digest = _IMAGE_PLAN_DIGESTS_BY_REF.get(image_ref)
+    if not plan_digest:
+        raise ValueError(f"Missing plan digest for Docker image {image_ref}.")
     _docker_run(
-        [DOCKER_COMMAND, "build", "--pull", "-t", image_ref, str(context_dir)],
+        [
+            DOCKER_COMMAND,
+            "build",
+            "--pull",
+            "--label",
+            f"{PLAN_DIGEST_LABEL}={plan_digest}",
+            "-t",
+            image_ref,
+            str(context_dir),
+        ],
         env={"DOCKER_BUILDKIT": "0"},
     )
 
@@ -348,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     DOCKER_COMMAND = args.docker
 
     try:
+        _IMAGE_PLAN_DIGESTS_BY_REF.clear()
         lock_data = load_port_deb_lock(args.lock_manifest)
         plan = build_image_plan(
             lock_data=lock_data,
@@ -357,12 +428,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         prepared_contexts: list[tuple[dict, Path]] = []
         for image_spec in plan["images"]:
+            _IMAGE_PLAN_DIGESTS_BY_REF[image_spec["image_ref"]] = image_spec["plan_digest"]
             context_dir = prepare_context(image_spec, args.context_root)
             prepared_contexts.append((image_spec, context_dir))
         output_path = write_json(args.output, plan)
         built_images = 0
         for image_spec, context_dir in prepared_contexts:
-            if _local_image_matches(image_spec):
+            require_plan_digest_match = plan["selection_scope"] == "filtered" and _is_aggregate_image(
+                image_spec
+            )
+            if _local_image_matches(
+                image_spec,
+                require_plan_digest_match=require_plan_digest_match,
+            ):
                 continue
             docker_build(image_spec["image_ref"], context_dir)
             built_images += 1
