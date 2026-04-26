@@ -38,7 +38,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Compute workflow flags and normalize libraries
+      - name: Compute should_push and normalize libraries
         id: flags
         shell: bash
         env:
@@ -51,20 +51,16 @@ jobs:
           PY
           )"
 
-          run_image_pipeline=false
           should_push=false
-          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-            run_image_pipeline=true
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == "refs/heads/main" ]]; then
             should_push=true
-          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            run_image_pipeline=true
-            if [[ "${PUSH_IMAGES_INPUT}" == "true" ]]; then
-              should_push=true
-            fi
+          elif [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            should_push=true
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${PUSH_IMAGES_INPUT}" == "true" ]]; then
+            should_push=true
           fi
 
           {
-            echo "run_image_pipeline=${run_image_pipeline}"
             echo "should_push=${should_push}"
             echo "libraries=${normalized_libraries}"
           } >> "${GITHUB_OUTPUT}"
@@ -103,13 +99,11 @@ jobs:
         run: make fetch-port-debs
 
       - name: Run make build-images
-        if: ${{ steps.flags.outputs.run_image_pipeline == 'true' }}
         env:
           LIBRARIES: ${{ steps.flags.outputs.libraries }}
         run: make build-images
 
       - name: Run make verify-images
-        if: ${{ steps.flags.outputs.run_image_pipeline == 'true' }}
         env:
           LIBRARIES: ${{ steps.flags.outputs.libraries }}
         run: make verify-images
