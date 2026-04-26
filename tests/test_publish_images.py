@@ -67,7 +67,12 @@ class PublishImagesTests(TestCase):
         mock_push_image,
     ) -> None:
         plan = copy.deepcopy(self.plan)
-        plan["images"] = [copy.deepcopy(self.plan["images"][-1]), *copy.deepcopy(self.plan["images"][:-1])]
+        plan["images"] = [
+            copy.deepcopy(self.plan["images"][2]),
+            copy.deepcopy(self.plan["images"][-1]),
+            copy.deepcopy(self.plan["images"][0]),
+            copy.deepcopy(self.plan["images"][1]),
+        ]
         events: list[tuple[str, str]] = []
 
         def record_exists(image_ref: str) -> None:
