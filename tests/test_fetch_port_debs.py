@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import tempfile
 from pathlib import Path
 from unittest import TestCase
@@ -155,3 +156,35 @@ class FetchPortDebsTests(TestCase):
         self.assertEqual("filtered", lock_manifest["selection_scope"])
         self.assertEqual(["alpha"], lock_manifest["requested_libraries"])
         self.assertEqual(1, len(lock_manifest["libraries"]))
+
+    @patch("tools.fetch_port_debs.inspect_deb")
+    @patch("tools.fetch_port_debs.download_file")
+    def test_lock_library_debs_rejects_library_path_traversal(
+        self,
+        mock_download_file,
+        mock_inspect_deb,
+    ) -> None:
+        library_entry = copy.deepcopy(self.alpha_library)
+        library_entry["library"] = "../escape"
+
+        with self.assertRaisesRegex(ValueError, "Unsafe library"):
+            lock_library_debs(library_entry, self.output_root)
+
+        mock_download_file.assert_not_called()
+        mock_inspect_deb.assert_not_called()
+
+    @patch("tools.fetch_port_debs.inspect_deb")
+    @patch("tools.fetch_port_debs.download_file")
+    def test_lock_library_debs_rejects_absolute_or_nested_filenames(
+        self,
+        mock_download_file,
+        mock_inspect_deb,
+    ) -> None:
+        library_entry = copy.deepcopy(self.alpha_library)
+        library_entry["port_debs"][0]["filename"] = "/tmp/libalpha1.deb"
+
+        with self.assertRaisesRegex(ValueError, "Unsafe filename"):
+            lock_library_debs(library_entry, self.output_root)
+
+        mock_download_file.assert_not_called()
+        mock_inspect_deb.assert_not_called()

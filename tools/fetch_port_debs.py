@@ -75,6 +75,32 @@ def inspect_deb(path: Path) -> dict:
     }
 
 
+def _validate_path_component(value: str, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Expected non-empty string for {field_name}.")
+    if value in {".", ".."}:
+        raise ValueError(f"Unsafe {field_name} {value!r}: dot path components are not allowed.")
+    if "/" in value or "\\" in value:
+        raise ValueError(
+            f"Unsafe {field_name} {value!r}: nested or absolute path components are not allowed."
+        )
+    return value
+
+
+def _build_destination_path(output_root: Path, library_name: str, filename: str) -> Path:
+    safe_library_name = _validate_path_component(library_name, "library")
+    safe_filename = _validate_path_component(filename, "filename")
+    resolved_output_root = output_root.resolve()
+    destination = (resolved_output_root / safe_library_name / safe_filename).resolve()
+    try:
+        destination.relative_to(resolved_output_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unsafe output path for library {safe_library_name!r} and filename {safe_filename!r}."
+        ) from exc
+    return destination
+
+
 def _verify_digest_and_size(path: Path, deb_entry: dict) -> None:
     expected_sha = deb_entry["sha256"]
     actual_sha = sha256_file(path)
@@ -140,11 +166,13 @@ def _materialize_deb(path: Path, source_url: str, deb_entry: dict) -> None:
 
 
 def _lock_single_deb(library_entry: dict, output_root: Path, deb_entry: dict) -> dict:
-    destination = output_root / library_entry["library"] / deb_entry["filename"]
+    library_name = _validate_path_component(library_entry["library"], "library")
+    filename = _validate_path_component(deb_entry["filename"], "filename")
+    destination = _build_destination_path(output_root, library_name, filename)
     source_url = build_release_asset_url(
         library_entry["port_repository"],
         library_entry["port_release_tag"],
-        deb_entry["filename"],
+        filename,
     )
 
     if not _matches_local_cache(destination, deb_entry):
@@ -172,7 +200,7 @@ def _lock_single_deb(library_entry: dict, output_root: Path, deb_entry: dict) ->
         "package": metadata["package"],
         "version": metadata["version"],
         "architecture": metadata["architecture"],
-        "filename": deb_entry["filename"],
+        "filename": filename,
         "sha256": deb_entry["sha256"],
         "size": deb_entry.get("size", destination.stat().st_size),
         "source_url": source_url,
@@ -183,8 +211,9 @@ def _lock_single_deb(library_entry: dict, output_root: Path, deb_entry: dict) ->
 def lock_library_debs(library_entry: dict, output_root: Path) -> dict:
     """Materialize and lock every expected Debian package for a library."""
 
+    library_name = _validate_path_component(library_entry["library"], "library")
     locked_library = {
-        "library": library_entry["library"],
+        "library": library_name,
         "apt_packages": copy.deepcopy(library_entry["apt_packages"]),
         "totals": copy.deepcopy(library_entry["totals"]),
         "port_repository": library_entry["port_repository"],
