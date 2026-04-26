@@ -116,7 +116,7 @@ class BuildImagesTests(TestCase):
                 "libc6 (>= 2.38)",
                 "libicu-dev (>= 74.1)",
                 "zlib1g-dev",
-                "python3 (>= 3.12)",
+                "python3:any (>= 3.12)",
             ],
             _dependency_requirements_for_packages(
                 [

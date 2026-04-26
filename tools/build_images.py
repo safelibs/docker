@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import apt_pkg
 import copy
 import hashlib
 import json
@@ -28,8 +27,6 @@ DOCKERFILE_DIGEST_LABEL = "org.safelibs.dockerfile-digest"
 _IMAGE_PLAN_DIGESTS_BY_REF: dict[str, str] = {}
 _CURRENT_BASE_IMAGE_ID = ""
 FULL_AGGREGATE_CACHE_TAG = "full-selection-cache"
-
-apt_pkg.init_system()
 
 
 def load_port_deb_lock(path: Path) -> dict:
@@ -323,6 +320,52 @@ def _parse_control_fields(output: str) -> dict[str, str]:
     return fields
 
 
+def _split_dependency_field(field_value: str, separator: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    paren_depth = 0
+    bracket_depth = 0
+    angle_depth = 0
+
+    for character in field_value:
+        if character == "(":
+            paren_depth += 1
+        elif character == ")" and paren_depth > 0:
+            paren_depth -= 1
+        elif character == "[":
+            bracket_depth += 1
+        elif character == "]" and bracket_depth > 0:
+            bracket_depth -= 1
+        elif character == "<":
+            angle_depth += 1
+        elif character == ">" and angle_depth > 0:
+            angle_depth -= 1
+
+        if (
+            character == separator
+            and paren_depth == 0
+            and bracket_depth == 0
+            and angle_depth == 0
+        ):
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            continue
+
+        current.append(character)
+
+    trailing = "".join(current).strip()
+    if trailing:
+        parts.append(trailing)
+    return parts
+
+
+def _dependency_clause_package_name(clause: str) -> str:
+    package_name = clause.strip().split(None, 1)[0]
+    return package_name.split(":", 1)[0]
+
+
 def _inspect_deb_dependency_fields(deb_path: Path) -> dict[str, str]:
     completed = subprocess.run(
         [
@@ -343,18 +386,6 @@ def _inspect_deb_dependency_fields(deb_path: Path) -> dict[str, str]:
     return _parse_control_fields(completed.stdout)
 
 
-def _format_dependency_group(
-    dependency_group: list[tuple[str, str, str]],
-) -> str:
-    clauses: list[str] = []
-    for package_name, version, operator in dependency_group:
-        clause = package_name
-        if operator and version:
-            clause += f" ({operator} {version})"
-        clauses.append(clause)
-    return " | ".join(clauses)
-
-
 def _dependency_requirements_for_packages(packages: list[dict]) -> list[str]:
     local_package_names = {package["package"] for package in packages}
     requirements: list[str] = []
@@ -367,10 +398,14 @@ def _dependency_requirements_for_packages(packages: list[dict]) -> list[str]:
             field_value = control_fields.get(field_name)
             if not field_value:
                 continue
-            for dependency_group in apt_pkg.parse_depends(field_value):
-                if any(package_name in local_package_names for package_name, _, _ in dependency_group):
+            for dependency_group in _split_dependency_field(field_value, ","):
+                clauses = _split_dependency_field(dependency_group, "|")
+                if any(
+                    _dependency_clause_package_name(clause) in local_package_names
+                    for clause in clauses
+                ):
                     continue
-                requirement = _format_dependency_group(dependency_group)
+                requirement = " | ".join(clause.strip() for clause in clauses if clause.strip())
                 if not requirement or requirement in seen_requirements:
                     continue
                 seen_requirements.add(requirement)
