@@ -211,13 +211,17 @@ def render_dockerfile(base_image: str) -> str:
     """Render the deterministic Dockerfile used for all SafeLibs images."""
 
     return (
+        "# syntax=docker/dockerfile:1\n"
         f"FROM {base_image}\n"
         "COPY debs/ /tmp/debs/\n"
-        "RUN set -eux; for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
+        "RUN --mount=type=cache,target=/var/cache/apt,sharing=locked "
+        "--mount=type=cache,target=/var/lib/apt,sharing=locked "
+        "set -eux; rm -f /etc/apt/apt.conf.d/docker-clean; "
+        "for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
         "DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "
         "-o DPkg::Use-Pty=0 --no-install-recommends /tmp/debs/*.deb && break; "
         "if [ \"$attempt\" -eq 3 ]; then exit 1; fi; rm -rf /var/lib/apt/lists/*; "
-        "sleep \"$attempt\"; done; rm -rf /var/lib/apt/lists/* /tmp/debs\n"
+        "sleep \"$attempt\"; done; rm -rf /tmp/debs\n"
     )
 
 
@@ -456,7 +460,8 @@ def docker_build(image_ref: str, context_dir: Path) -> None:
             "-t",
             image_ref,
             str(context_dir),
-        ]
+        ],
+        env={"DOCKER_BUILDKIT": "1"},
     )
 
 

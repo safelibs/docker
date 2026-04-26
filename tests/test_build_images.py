@@ -56,13 +56,17 @@ class BuildImagesTests(TestCase):
     def test_render_dockerfile_matches_contract(self) -> None:
         self.assertEqual(
             (
+                "# syntax=docker/dockerfile:1\n"
                 "FROM ubuntu:24.04\n"
                 "COPY debs/ /tmp/debs/\n"
-                "RUN set -eux; for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
+                "RUN --mount=type=cache,target=/var/cache/apt,sharing=locked "
+                "--mount=type=cache,target=/var/lib/apt,sharing=locked "
+                "set -eux; rm -f /etc/apt/apt.conf.d/docker-clean; "
+                "for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
                 "DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "
                 "-o DPkg::Use-Pty=0 --no-install-recommends /tmp/debs/*.deb && break; "
                 "if [ \"$attempt\" -eq 3 ]; then exit 1; fi; rm -rf /var/lib/apt/lists/*; "
-                "sleep \"$attempt\"; done; rm -rf /var/lib/apt/lists/* /tmp/debs\n"
+                "sleep \"$attempt\"; done; rm -rf /tmp/debs\n"
             ),
             render_dockerfile("ubuntu:24.04"),
         )
@@ -222,6 +226,7 @@ class BuildImagesTests(TestCase):
                 "safelibs/all:latest",
                 str(context_dir),
             ],
+            env={"DOCKER_BUILDKIT": "1"},
         )
 
     @patch("tools.build_images._query_image_base_id")
