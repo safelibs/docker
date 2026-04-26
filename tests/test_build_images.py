@@ -9,12 +9,14 @@ from unittest.mock import patch
 from tools import ensure_directory, read_json, repo_relative_path, repo_root
 from tools.build_images import (
     BASE_IMAGE_ID_LABEL,
+    _DEPENDENCY_REQUIREMENTS_BY_PLAN_DIGEST,
     DOCKERFILE_DIGEST_LABEL,
     PLAN_DIGEST_LABEL,
     _IMAGE_PLAN_DIGESTS_BY_REF,
     _aggregate_cache_image_ref,
     _build_execution_order,
     _dependency_requirements_for_packages,
+    _image_dependency_requirements,
     _dockerfile_digest,
     _local_image_matches,
     _preserve_full_aggregate_cache,
@@ -40,6 +42,7 @@ class BuildImagesTests(TestCase):
     def setUp(self) -> None:
         self.lock_data = read_json(FIXTURES / "port-debs-lock.json")
         self.expected_plan = read_json(FIXTURES / "image-build-plan.json")
+        _DEPENDENCY_REQUIREMENTS_BY_PLAN_DIGEST.clear()
         ensure_directory(repo_root() / ".work")
         self._tempdir = tempfile.TemporaryDirectory(dir=str(repo_root() / ".work"))
         self.temp_root = Path(self._tempdir.name)
@@ -126,6 +129,31 @@ class BuildImagesTests(TestCase):
                 ]
             ),
         )
+
+    @patch("tools.build_images._inspect_deb_dependency_fields")
+    @patch("tools.build_images._validate_local_deb")
+    def test_image_dependency_requirements_cache_does_not_mutate_image_spec(
+        self,
+        mock_validate_local_deb,
+        mock_inspect_deb_dependency_fields,
+    ) -> None:
+        image_spec = {
+            "plan_digest": "plan-1",
+            "packages": [{"package": "python3-libxml2", "local_path": ".work/python3-libxml2.deb"}],
+        }
+        mock_validate_local_deb.return_value = Path("/tmp/python3-libxml2.deb")
+        mock_inspect_deb_dependency_fields.return_value = {
+            "Depends": "python3:any (>= 3.12), libxml2 (= 1.0)"
+        }
+
+        first = _image_dependency_requirements(image_spec)
+        second = _image_dependency_requirements(image_spec)
+
+        self.assertEqual(["python3:any (>= 3.12)", "libxml2 (= 1.0)"], first)
+        self.assertEqual(first, second)
+        self.assertNotIn("dependency_requirements", image_spec)
+        mock_validate_local_deb.assert_called_once()
+        mock_inspect_deb_dependency_fields.assert_called_once()
 
     def test_build_image_plan_matches_fixture(self) -> None:
         plan = build_image_plan(

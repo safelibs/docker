@@ -25,6 +25,7 @@ PLAN_DIGEST_LABEL = "org.safelibs.image-plan-digest"
 BASE_IMAGE_ID_LABEL = "org.safelibs.base-image-id"
 DOCKERFILE_DIGEST_LABEL = "org.safelibs.dockerfile-digest"
 _IMAGE_PLAN_DIGESTS_BY_REF: dict[str, str] = {}
+_DEPENDENCY_REQUIREMENTS_BY_PLAN_DIGEST: dict[str, list[str]] = {}
 _CURRENT_BASE_IMAGE_ID = ""
 FULL_AGGREGATE_CACHE_TAG = "full-selection-cache"
 
@@ -415,7 +416,10 @@ def _dependency_requirements_for_packages(packages: list[dict]) -> list[str]:
 
 
 def _image_dependency_requirements(image_spec: dict) -> list[str]:
-    cached_requirements = image_spec.get("dependency_requirements")
+    cache_key = image_spec.get("plan_digest")
+    cached_requirements = (
+        _DEPENDENCY_REQUIREMENTS_BY_PLAN_DIGEST.get(cache_key) if cache_key else None
+    )
     if cached_requirements is not None:
         return list(cached_requirements)
 
@@ -424,7 +428,8 @@ def _image_dependency_requirements(image_spec: dict) -> list[str]:
         return []
 
     dependency_requirements = _dependency_requirements_for_packages(packages)
-    image_spec["dependency_requirements"] = dependency_requirements
+    if cache_key:
+        _DEPENDENCY_REQUIREMENTS_BY_PLAN_DIGEST[cache_key] = list(dependency_requirements)
     return dependency_requirements
 
 
@@ -691,6 +696,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         _IMAGE_PLAN_DIGESTS_BY_REF.clear()
+        _DEPENDENCY_REQUIREMENTS_BY_PLAN_DIGEST.clear()
         _CURRENT_BASE_IMAGE_ID = _refresh_base_image(args.base_image)
         lock_data = load_port_deb_lock(args.lock_manifest)
         plan = build_image_plan(
