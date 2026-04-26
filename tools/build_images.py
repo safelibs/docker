@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import apt_pkg
 import copy
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -26,6 +28,8 @@ DOCKERFILE_DIGEST_LABEL = "org.safelibs.dockerfile-digest"
 _IMAGE_PLAN_DIGESTS_BY_REF: dict[str, str] = {}
 _CURRENT_BASE_IMAGE_ID = ""
 FULL_AGGREGATE_CACHE_TAG = "full-selection-cache"
+
+apt_pkg.init_system()
 
 
 def load_port_deb_lock(path: Path) -> dict:
@@ -223,20 +227,48 @@ def build_image_plan(
     }
 
 
-def render_dockerfile(base_image: str) -> str:
+def render_dockerfile(
+    base_image: str,
+    dependency_requirements: list[str] | None = None,
+) -> str:
     """Render the deterministic Dockerfile used for all SafeLibs images."""
 
+    requirements = list(dependency_requirements or [])
+    if not requirements:
+        return (
+            "# syntax=docker/dockerfile:1\n"
+            f"FROM {base_image}\n"
+            "COPY debs/ /tmp/debs/\n"
+            "RUN set -eux; dpkg --force-unsafe-io -i /tmp/debs/*.deb; "
+            "apt-get check; rm -rf /tmp/debs\n"
+        )
+
+    quoted_requirements = " ".join(shlex.quote(requirement) for requirement in requirements)
     return (
         "# syntax=docker/dockerfile:1\n"
         f"FROM {base_image}\n"
         "COPY debs/ /tmp/debs/\n"
-        "RUN set -eux; dpkg --force-unsafe-io --force-depends -i /tmp/debs/*.deb; "
-        "rm -rf /tmp/debs\n"
+        "RUN --mount=type=cache,target=/var/cache/apt,sharing=locked "
+        "--mount=type=cache,target=/var/lib/apt/lists,sharing=locked "
+        "set -eux; rm -f /etc/apt/apt.conf.d/docker-clean; "
+        "for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
+        "DEBIAN_FRONTEND=noninteractive apt-get satisfy -y -o Acquire::Retries=3 "
+        "-o DPkg::Use-Pty=0 -o Dpkg::Options::=--force-unsafe-io "
+        f"--no-install-recommends {quoted_requirements} && break; "
+        "if [ \"$attempt\" -eq 3 ]; then exit 1; fi; rm -rf /var/lib/apt/lists/*; "
+        "sleep \"$attempt\"; done; "
+        "dpkg --force-unsafe-io -i /tmp/debs/*.deb; "
+        "apt-get check; rm -rf /tmp/debs\n"
     )
 
 
-def _dockerfile_digest(base_image: str) -> str:
-    return hashlib.sha256(render_dockerfile(base_image).encode("utf-8")).hexdigest()
+def _dockerfile_digest(
+    base_image: str,
+    dependency_requirements: list[str] | None = None,
+) -> str:
+    return hashlib.sha256(
+        render_dockerfile(base_image, dependency_requirements).encode("utf-8")
+    ).hexdigest()
 
 
 def _context_dockerfile_digest(context_dir: Path) -> str:
@@ -271,6 +303,104 @@ def _validate_local_deb(package: dict) -> Path:
     return deb_path
 
 
+def _parse_control_fields(output: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    current_field: str | None = None
+    for raw_line in output.splitlines():
+        if not raw_line:
+            continue
+        if raw_line[0].isspace():
+            if current_field is None:
+                raise ValueError("Unexpected continuation line in Debian control output.")
+            fields[current_field] += f" {raw_line.strip()}"
+            continue
+
+        field_name, separator, field_value = raw_line.partition(":")
+        if separator != ":":
+            raise ValueError(f"Unexpected Debian control output line: {raw_line!r}")
+        current_field = field_name.strip()
+        fields[current_field] = field_value.strip()
+    return fields
+
+
+def _inspect_deb_dependency_fields(deb_path: Path) -> dict[str, str]:
+    completed = subprocess.run(
+        [
+            "dpkg-deb",
+            "--field",
+            str(deb_path),
+            "Package",
+            "Pre-Depends",
+            "Depends",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        output = completed.stderr.strip() or completed.stdout.strip() or "no output"
+        raise ValueError(f"Unable to inspect Debian control metadata for {deb_path}: {output}")
+    return _parse_control_fields(completed.stdout)
+
+
+def _format_dependency_group(
+    dependency_group: list[tuple[str, str, str]],
+) -> str:
+    clauses: list[str] = []
+    for package_name, version, operator in dependency_group:
+        clause = package_name
+        if operator and version:
+            clause += f" ({operator} {version})"
+        clauses.append(clause)
+    return " | ".join(clauses)
+
+
+def _dependency_requirements_for_packages(packages: list[dict]) -> list[str]:
+    local_package_names = {package["package"] for package in packages}
+    requirements: list[str] = []
+    seen_requirements: set[str] = set()
+
+    for package in packages:
+        deb_path = _validate_local_deb(package)
+        control_fields = _inspect_deb_dependency_fields(deb_path)
+        for field_name in ("Pre-Depends", "Depends"):
+            field_value = control_fields.get(field_name)
+            if not field_value:
+                continue
+            for dependency_group in apt_pkg.parse_depends(field_value):
+                if any(package_name in local_package_names for package_name, _, _ in dependency_group):
+                    continue
+                requirement = _format_dependency_group(dependency_group)
+                if not requirement or requirement in seen_requirements:
+                    continue
+                seen_requirements.add(requirement)
+                requirements.append(requirement)
+
+    return requirements
+
+
+def _image_dependency_requirements(image_spec: dict) -> list[str]:
+    cached_requirements = image_spec.get("dependency_requirements")
+    if cached_requirements is not None:
+        return list(cached_requirements)
+
+    packages = list(image_spec.get("packages") or [])
+    if not packages or any(not package.get("local_path") for package in packages):
+        return []
+
+    dependency_requirements = _dependency_requirements_for_packages(packages)
+    image_spec["dependency_requirements"] = dependency_requirements
+    return dependency_requirements
+
+
+def _dependency_health_ok(image_ref: str) -> bool:
+    completed = _docker_run(
+        [DOCKER_COMMAND, "run", "--rm", image_ref, "apt-get", "check"],
+        check=False,
+    )
+    return completed.returncode == 0
+
+
 def prepare_context(image_spec: dict, workspace_root: Path) -> Path:
     """Create a deterministic Docker build context for a single image."""
 
@@ -289,8 +419,9 @@ def prepare_context(image_spec: dict, workspace_root: Path) -> Path:
         source_path = _validate_local_deb(package)
         shutil.copyfile(source_path, debs_dir / package["filename"])
 
+    dependency_requirements = _image_dependency_requirements(image_spec)
     (context_dir / "Dockerfile").write_text(
-        render_dockerfile(image_spec["base_image"]),
+        render_dockerfile(image_spec["base_image"], dependency_requirements),
         encoding="utf-8",
     )
 
@@ -440,7 +571,11 @@ def _local_image_matches(image_spec: dict) -> bool:
         return False
     if _query_image_base_id(image_ref) != _CURRENT_BASE_IMAGE_ID:
         return False
-    if _query_image_dockerfile_digest(image_ref) != _dockerfile_digest(image_spec["base_image"]):
+    dependency_requirements = _image_dependency_requirements(image_spec)
+    if _query_image_dockerfile_digest(image_ref) != _dockerfile_digest(
+        image_spec["base_image"],
+        dependency_requirements,
+    ):
         return False
 
     expected_versions = {
@@ -450,7 +585,9 @@ def _local_image_matches(image_spec: dict) -> bool:
     observed_versions = _query_installed_packages(image_ref, list(expected_versions))
     if observed_versions is None:
         return False
-    return observed_versions == expected_versions
+    if observed_versions != expected_versions:
+        return False
+    return _dependency_health_ok(image_ref)
 
 
 def _docker_tag(source_ref: str, target_ref: str) -> None:

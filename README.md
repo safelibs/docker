@@ -19,9 +19,9 @@ locked package set for that library. The aggregate image installs the combined
 runtime library surface only, excluding development packages, bindings, and
 tooling (`-dev`, `gir1.2-*`, `python3-*`, `*-tools`, `*-progs`, `*-utils`, and
 non-`lib*` packages) so the full-selection build remains practical. Images lay
-down the locked SafeLibs `.deb` payloads directly with `dpkg` instead of
-resolving mutable Ubuntu repository dependencies during the build. The default
-base image is
+down the locked SafeLibs `.deb` payloads after installing their Ubuntu
+repository dependencies, and the build fails if `apt-get check` is not clean.
+The default base image is
 `ubuntu:24.04` because the validator suite and the prepared SafeLibs `.deb`
 artifacts are locked against the Ubuntu Noble environment encoded in the proof
 metadata; changing the base image would break that contract.

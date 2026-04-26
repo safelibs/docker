@@ -57,15 +57,18 @@ class VerifyImagesTests(TestCase):
 
     @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
+    @patch("tools.verify_images.dependency_health_ok")
     @patch("tools.verify_images.query_installed_packages")
     def test_verify_image_requires_exact_versions(
         self,
         mock_query_installed_packages,
+        mock_dependency_health_ok,
         mock_query_image_plan_digest,
         mock_query_image_base_id,
     ) -> None:
         mock_query_image_plan_digest.return_value = self.plan["images"][0]["plan_digest"]
         mock_query_image_base_id.return_value = self.plan["base_image_id"]
+        mock_dependency_health_ok.return_value = True
         mock_query_installed_packages.return_value = {"libalpha1": "1.0-1wrong"}
 
         with self.assertRaisesRegex(ValueError, "expected 1.0-1safelibs1 observed 1.0-1wrong"):
@@ -88,19 +91,42 @@ class VerifyImagesTests(TestCase):
 
     @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
+    @patch("tools.verify_images.dependency_health_ok")
     @patch("tools.verify_images.query_installed_packages")
     def test_verify_image_checks_expected_packages_after_plan_digest(
         self,
         mock_query_installed_packages,
+        mock_dependency_health_ok,
+        mock_query_image_plan_digest,
+        mock_query_image_base_id,
+    ) -> None:
+        mock_query_image_plan_digest.return_value = self.plan["images"][0]["plan_digest"]
+        mock_query_image_base_id.return_value = self.plan["base_image_id"]
+        mock_dependency_health_ok.return_value = True
+        mock_query_installed_packages.return_value = {"libalpha1": "1.0-1safelibs1"}
+
+        with patch("tools.verify_images._EXPECTED_BASE_IMAGE_ID", self.plan["base_image_id"]):
+            verify_image(self.plan["images"][0])
+
+    @patch("tools.verify_images._query_image_base_id")
+    @patch("tools.verify_images._query_image_plan_digest")
+    @patch("tools.verify_images.dependency_health_ok")
+    @patch("tools.verify_images.query_installed_packages")
+    def test_verify_image_rejects_dependency_health_failure(
+        self,
+        mock_query_installed_packages,
+        mock_dependency_health_ok,
         mock_query_image_plan_digest,
         mock_query_image_base_id,
     ) -> None:
         mock_query_image_plan_digest.return_value = self.plan["images"][0]["plan_digest"]
         mock_query_image_base_id.return_value = self.plan["base_image_id"]
         mock_query_installed_packages.return_value = {"libalpha1": "1.0-1safelibs1"}
+        mock_dependency_health_ok.return_value = False
 
-        with patch("tools.verify_images._EXPECTED_BASE_IMAGE_ID", self.plan["base_image_id"]):
-            verify_image(self.plan["images"][0])
+        with self.assertRaisesRegex(ValueError, "dependency health"):
+            with patch("tools.verify_images._EXPECTED_BASE_IMAGE_ID", self.plan["base_image_id"]):
+                verify_image(self.plan["images"][0])
 
     @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
@@ -136,10 +162,12 @@ class VerifyImagesTests(TestCase):
 
     @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
+    @patch("tools.verify_images.dependency_health_ok")
     @patch("tools.verify_images.query_installed_packages")
     def test_verify_build_plan_rejects_filtered_aggregate_scope_mismatch(
         self,
         mock_query_installed_packages,
+        mock_dependency_health_ok,
         mock_query_image_plan_digest,
         mock_query_image_base_id,
     ) -> None:
@@ -183,6 +211,7 @@ class VerifyImagesTests(TestCase):
         mock_query_image_base_id.return_value = self.plan["base_image_id"]
         mock_query_installed_packages.side_effect = fake_query
         mock_query_image_plan_digest.side_effect = fake_digest
+        mock_dependency_health_ok.return_value = True
 
         with self.assertRaisesRegex(ValueError, "plan digest"):
             verify_build_plan(filtered_plan, ["delta", "alpha"])

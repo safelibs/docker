@@ -102,6 +102,16 @@ def _query_image_base_id(image_ref: str) -> str | None:
     return _query_image_label(image_ref, BASE_IMAGE_ID_LABEL)
 
 
+def dependency_health_ok(image_ref: str) -> bool:
+    completed = subprocess.run(
+        [DOCKER_COMMAND, "run", "--rm", image_ref, "apt-get", "check"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0
+
+
 def verify_image(image_spec: dict) -> None:
     """Verify exact package versions for a single built image."""
 
@@ -161,6 +171,11 @@ def verify_image(image_spec: dict) -> None:
             for package, expected, observed in mismatches
         )
         raise ValueError(f"Image {image_spec['image_ref']} failed package verification: {mismatch_text}")
+
+    if not dependency_health_ok(image_spec["image_ref"]):
+        raise ValueError(
+            f"Image {image_spec['image_ref']} failed dependency health verification."
+        )
 
 
 def verify_build_plan(plan: dict, requested_libraries: list[str]) -> None:

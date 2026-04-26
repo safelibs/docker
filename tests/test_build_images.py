@@ -14,6 +14,7 @@ from tools.build_images import (
     _IMAGE_PLAN_DIGESTS_BY_REF,
     _aggregate_cache_image_ref,
     _build_execution_order,
+    _dependency_requirements_for_packages,
     _dockerfile_digest,
     _local_image_matches,
     _preserve_full_aggregate_cache,
@@ -62,10 +63,68 @@ class BuildImagesTests(TestCase):
                 "# syntax=docker/dockerfile:1\n"
                 "FROM ubuntu:24.04\n"
                 "COPY debs/ /tmp/debs/\n"
-                "RUN set -eux; dpkg --force-unsafe-io --force-depends -i /tmp/debs/*.deb; "
-                "rm -rf /tmp/debs\n"
+                "RUN set -eux; dpkg --force-unsafe-io -i /tmp/debs/*.deb; "
+                "apt-get check; rm -rf /tmp/debs\n"
             ),
             render_dockerfile("ubuntu:24.04"),
+        )
+
+    def test_render_dockerfile_includes_dependency_resolution_when_present(self) -> None:
+        self.assertEqual(
+            (
+                "# syntax=docker/dockerfile:1\n"
+                "FROM ubuntu:24.04\n"
+                "COPY debs/ /tmp/debs/\n"
+                "RUN --mount=type=cache,target=/var/cache/apt,sharing=locked "
+                "--mount=type=cache,target=/var/lib/apt/lists,sharing=locked "
+                "set -eux; rm -f /etc/apt/apt.conf.d/docker-clean; "
+                "for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
+                "DEBIAN_FRONTEND=noninteractive apt-get satisfy -y -o Acquire::Retries=3 "
+                "-o DPkg::Use-Pty=0 -o Dpkg::Options::=--force-unsafe-io "
+                "--no-install-recommends 'python3 (>= 3.12)' 'libicu-dev (>= 74.1)' && break; "
+                "if [ \"$attempt\" -eq 3 ]; then exit 1; fi; rm -rf /var/lib/apt/lists/*; "
+                "sleep \"$attempt\"; done; "
+                "dpkg --force-unsafe-io -i /tmp/debs/*.deb; "
+                "apt-get check; rm -rf /tmp/debs\n"
+            ),
+            render_dockerfile(
+                "ubuntu:24.04",
+                ["python3 (>= 3.12)", "libicu-dev (>= 74.1)"],
+            ),
+        )
+
+    @patch("tools.build_images._inspect_deb_dependency_fields")
+    @patch("tools.build_images._validate_local_deb")
+    def test_dependency_requirements_skip_local_package_clauses(
+        self,
+        mock_validate_local_deb,
+        mock_inspect_deb_dependency_fields,
+    ) -> None:
+        mock_validate_local_deb.side_effect = [
+            Path("/tmp/libxml2.deb"),
+            Path("/tmp/libxml2-dev.deb"),
+            Path("/tmp/python3-libxml2.deb"),
+        ]
+        mock_inspect_deb_dependency_fields.side_effect = [
+            {"Depends": "libc6 (>= 2.38)"},
+            {"Depends": "libicu-dev (>= 74.1), libxml2 (= 1.0), zlib1g-dev"},
+            {"Depends": "python3:any (>= 3.12), libxml2 (= 1.0)"},
+        ]
+
+        self.assertEqual(
+            [
+                "libc6 (>= 2.38)",
+                "libicu-dev (>= 74.1)",
+                "zlib1g-dev",
+                "python3 (>= 3.12)",
+            ],
+            _dependency_requirements_for_packages(
+                [
+                    {"package": "libxml2", "local_path": ".work/libxml2.deb"},
+                    {"package": "libxml2-dev", "local_path": ".work/libxml2-dev.deb"},
+                    {"package": "python3-libxml2", "local_path": ".work/python3-libxml2.deb"},
+                ]
+            ),
         )
 
     def test_build_image_plan_matches_fixture(self) -> None:
@@ -216,7 +275,8 @@ class BuildImagesTests(TestCase):
         stale_dir.mkdir(parents=True, exist_ok=True)
         (stale_dir / "stale.txt").write_text("stale\n", encoding="utf-8")
 
-        context_dir = prepare_context(image_spec, context_root)
+        with patch("tools.build_images._image_dependency_requirements", return_value=[]):
+            context_dir = prepare_context(image_spec, context_root)
 
         self.assertEqual(context_root / "alpha", context_dir)
         self.assertEqual(repo_relative_path(context_dir), image_spec["context_dir"])
@@ -258,7 +318,8 @@ class BuildImagesTests(TestCase):
             requested_libraries=[],
         )
 
-        context_dir = prepare_context(plan["images"][-1], self.temp_root / "contexts")
+        with patch("tools.build_images._image_dependency_requirements", return_value=[]):
+            context_dir = prepare_context(plan["images"][-1], self.temp_root / "contexts")
 
         self.assertTrue((context_dir / "debs").is_dir())
         self.assertFalse((context_dir / "debs-01-primary").exists())
@@ -320,6 +381,7 @@ class BuildImagesTests(TestCase):
             env={"DOCKER_BUILDKIT": "1"},
         )
 
+    @patch("tools.build_images._dependency_health_ok")
     @patch("tools.build_images._query_image_dockerfile_digest")
     @patch("tools.build_images._query_image_base_id")
     @patch("tools.build_images._query_image_plan_digest")
@@ -332,11 +394,13 @@ class BuildImagesTests(TestCase):
         mock_query_image_plan_digest,
         mock_query_image_base_id,
         mock_query_image_dockerfile_digest,
+        mock_dependency_health_ok,
     ) -> None:
         mock_local_image_exists.return_value = True
         mock_query_image_plan_digest.return_value = "full-plan-digest"
         mock_query_image_base_id.return_value = "sha256:test-base"
         mock_query_image_dockerfile_digest.return_value = _dockerfile_digest("ubuntu:24.04")
+        mock_dependency_health_ok.return_value = True
         mock_query_installed_packages.return_value = {
             "libalpha1": "1.0-1safelibs1",
             "libdelta1": "3.0-1safelibs1",
@@ -354,6 +418,7 @@ class BuildImagesTests(TestCase):
         with patch("tools.build_images._CURRENT_BASE_IMAGE_ID", "sha256:test-base"):
             self.assertFalse(_local_image_matches(image_spec))
 
+    @patch("tools.build_images._dependency_health_ok")
     @patch("tools.build_images._query_image_dockerfile_digest")
     @patch("tools.build_images._query_image_base_id")
     @patch("tools.build_images._query_image_plan_digest")
@@ -366,11 +431,13 @@ class BuildImagesTests(TestCase):
         mock_query_image_plan_digest,
         mock_query_image_base_id,
         mock_query_image_dockerfile_digest,
+        mock_dependency_health_ok,
     ) -> None:
         mock_local_image_exists.return_value = True
         mock_query_image_plan_digest.return_value = "matching-plan-digest"
         mock_query_image_base_id.return_value = "sha256:test-base"
         mock_query_image_dockerfile_digest.return_value = _dockerfile_digest("ubuntu:24.04")
+        mock_dependency_health_ok.return_value = True
         mock_query_installed_packages.return_value = {
             "libalpha1": "1.0-1safelibs1",
         }
@@ -386,6 +453,7 @@ class BuildImagesTests(TestCase):
         with patch("tools.build_images._CURRENT_BASE_IMAGE_ID", "sha256:test-base"):
             self.assertTrue(_local_image_matches(image_spec))
 
+    @patch("tools.build_images._dependency_health_ok")
     @patch("tools.build_images._query_image_dockerfile_digest")
     @patch("tools.build_images._query_image_base_id")
     @patch("tools.build_images._query_image_plan_digest")
@@ -398,11 +466,13 @@ class BuildImagesTests(TestCase):
         mock_query_image_plan_digest,
         mock_query_image_base_id,
         mock_query_image_dockerfile_digest,
+        mock_dependency_health_ok,
     ) -> None:
         mock_local_image_exists.return_value = True
         mock_query_image_plan_digest.return_value = "matching-plan-digest"
         mock_query_image_base_id.return_value = "sha256:stale-base"
         mock_query_image_dockerfile_digest.return_value = _dockerfile_digest("ubuntu:24.04")
+        mock_dependency_health_ok.return_value = True
         mock_query_installed_packages.return_value = {"libalpha1": "1.0-1safelibs1"}
         image_spec = {
             "image_ref": "safelibs/alpha:latest",
@@ -416,6 +486,7 @@ class BuildImagesTests(TestCase):
         with patch("tools.build_images._CURRENT_BASE_IMAGE_ID", "sha256:test-base"):
             self.assertFalse(_local_image_matches(image_spec))
 
+    @patch("tools.build_images._dependency_health_ok")
     @patch("tools.build_images._query_image_dockerfile_digest")
     @patch("tools.build_images._query_image_base_id")
     @patch("tools.build_images._query_image_plan_digest")
@@ -428,12 +499,47 @@ class BuildImagesTests(TestCase):
         mock_query_image_plan_digest,
         mock_query_image_base_id,
         mock_query_image_dockerfile_digest,
+        mock_dependency_health_ok,
     ) -> None:
         mock_local_image_exists.return_value = True
         mock_query_image_plan_digest.return_value = "matching-plan-digest"
         mock_query_image_base_id.return_value = "sha256:test-base"
         mock_query_image_dockerfile_digest.return_value = "stale-dockerfile-digest"
+        mock_dependency_health_ok.return_value = True
         mock_query_installed_packages.return_value = {"libalpha1": "1.0-1safelibs1"}
+        image_spec = {
+            "image_ref": "safelibs/alpha:latest",
+            "plan_digest": "matching-plan-digest",
+            "packages": [
+                {"package": "libalpha1", "version": "1.0-1safelibs1"},
+            ],
+            "base_image": "ubuntu:24.04",
+        }
+
+        with patch("tools.build_images._CURRENT_BASE_IMAGE_ID", "sha256:test-base"):
+            self.assertFalse(_local_image_matches(image_spec))
+
+    @patch("tools.build_images._dependency_health_ok")
+    @patch("tools.build_images._query_image_dockerfile_digest")
+    @patch("tools.build_images._query_image_base_id")
+    @patch("tools.build_images._query_image_plan_digest")
+    @patch("tools.build_images._query_installed_packages")
+    @patch("tools.build_images._local_image_exists")
+    def test_local_image_match_rejects_dependency_health_failure(
+        self,
+        mock_local_image_exists,
+        mock_query_installed_packages,
+        mock_query_image_plan_digest,
+        mock_query_image_base_id,
+        mock_query_image_dockerfile_digest,
+        mock_dependency_health_ok,
+    ) -> None:
+        mock_local_image_exists.return_value = True
+        mock_query_image_plan_digest.return_value = "matching-plan-digest"
+        mock_query_image_base_id.return_value = "sha256:test-base"
+        mock_query_image_dockerfile_digest.return_value = _dockerfile_digest("ubuntu:24.04")
+        mock_query_installed_packages.return_value = {"libalpha1": "1.0-1safelibs1"}
+        mock_dependency_health_ok.return_value = False
         image_spec = {
             "image_ref": "safelibs/alpha:latest",
             "plan_digest": "matching-plan-digest",
