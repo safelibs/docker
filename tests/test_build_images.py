@@ -58,8 +58,11 @@ class BuildImagesTests(TestCase):
             (
                 "FROM ubuntu:24.04\n"
                 "COPY debs/ /tmp/debs/\n"
-                "RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "
-                "--no-install-recommends /tmp/debs/*.deb && rm -rf /var/lib/apt/lists/* /tmp/debs\n"
+                "RUN set -eux; for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
+                "DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "
+                "-o DPkg::Use-Pty=0 --no-install-recommends /tmp/debs/*.deb && break; "
+                "if [ \"$attempt\" -eq 3 ]; then exit 1; fi; rm -rf /var/lib/apt/lists/*; "
+                "sleep \"$attempt\"; done; rm -rf /var/lib/apt/lists/* /tmp/debs\n"
             ),
             render_dockerfile("ubuntu:24.04"),
         )
@@ -219,7 +222,6 @@ class BuildImagesTests(TestCase):
                 "safelibs/all:latest",
                 str(context_dir),
             ],
-            env={"DOCKER_BUILDKIT": "0"},
         )
 
     @patch("tools.build_images._query_image_base_id")

@@ -213,8 +213,11 @@ def render_dockerfile(base_image: str) -> str:
     return (
         f"FROM {base_image}\n"
         "COPY debs/ /tmp/debs/\n"
-        "RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "
-        "--no-install-recommends /tmp/debs/*.deb && rm -rf /var/lib/apt/lists/* /tmp/debs\n"
+        "RUN set -eux; for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "
+        "-o DPkg::Use-Pty=0 --no-install-recommends /tmp/debs/*.deb && break; "
+        "if [ \"$attempt\" -eq 3 ]; then exit 1; fi; rm -rf /var/lib/apt/lists/*; "
+        "sleep \"$attempt\"; done; rm -rf /var/lib/apt/lists/* /tmp/debs\n"
     )
 
 
@@ -453,8 +456,7 @@ def docker_build(image_ref: str, context_dir: Path) -> None:
             "-t",
             image_ref,
             str(context_dir),
-        ],
-        env={"DOCKER_BUILDKIT": "0"},
+        ]
     )
 
 
