@@ -14,6 +14,7 @@ DEFAULT_IMAGE_BUILD_PLAN = Path("dist/image-build-plan.json")
 DOCKER_COMMAND = "docker"
 PLAN_DIGEST_LABEL = "org.safelibs.image-plan-digest"
 BASE_IMAGE_ID_LABEL = "org.safelibs.base-image-id"
+_EXPECTED_BASE_IMAGE_ID = ""
 
 
 def load_image_build_plan(path: Path) -> dict:
@@ -101,11 +102,7 @@ def _query_image_base_id(image_ref: str) -> str | None:
     return _query_image_label(image_ref, BASE_IMAGE_ID_LABEL)
 
 
-def _is_aggregate_image(image_spec: dict) -> bool:
-    return image_spec["image_ref"].rsplit("/", 1)[-1] == "all:latest"
-
-
-def verify_image(image_spec: dict, *, expected_base_image_id: str) -> None:
+def verify_image(image_spec: dict) -> None:
     """Verify exact package versions for a single built image."""
 
     expected_digest = image_spec.get("plan_digest")
@@ -116,6 +113,11 @@ def verify_image(image_spec: dict, *, expected_base_image_id: str) -> None:
         raise ValueError(
             f"Image {image_spec['image_ref']} has plan digest {observed_digest!r}, "
             f"expected {expected_digest!r}"
+        )
+    expected_base_image_id = _EXPECTED_BASE_IMAGE_ID or image_spec.get("base_image_id")
+    if not expected_base_image_id:
+        raise ValueError(
+            f"Image plan for {image_spec['image_ref']} is missing an expected base_image_id."
         )
     observed_base_image_id = _query_image_base_id(image_spec["image_ref"])
     if observed_base_image_id != expected_base_image_id:
@@ -187,8 +189,14 @@ def verify_build_plan(plan: dict, requested_libraries: list[str]) -> None:
     if not isinstance(base_image_id, str) or not base_image_id:
         raise ValueError("Image build plan is missing base_image_id.")
 
-    for image_spec in images:
-        verify_image(image_spec, expected_base_image_id=base_image_id)
+    global _EXPECTED_BASE_IMAGE_ID
+    previous_expected_base_image_id = _EXPECTED_BASE_IMAGE_ID
+    _EXPECTED_BASE_IMAGE_ID = base_image_id
+    try:
+        for image_spec in images:
+            verify_image(image_spec)
+    finally:
+        _EXPECTED_BASE_IMAGE_ID = previous_expected_base_image_id
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

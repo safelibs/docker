@@ -69,7 +69,8 @@ class VerifyImagesTests(TestCase):
         mock_query_installed_packages.return_value = {"libalpha1": "1.0-1wrong"}
 
         with self.assertRaisesRegex(ValueError, "expected 1.0-1safelibs1 observed 1.0-1wrong"):
-            verify_image(self.plan["images"][0], expected_base_image_id=self.plan["base_image_id"])
+            with patch("tools.verify_images._EXPECTED_BASE_IMAGE_ID", self.plan["base_image_id"]):
+                verify_image(self.plan["images"][0])
 
     @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
@@ -82,7 +83,8 @@ class VerifyImagesTests(TestCase):
         mock_query_image_base_id.return_value = self.plan["base_image_id"]
 
         with self.assertRaisesRegex(ValueError, "plan digest"):
-            verify_image(self.plan["images"][0], expected_base_image_id=self.plan["base_image_id"])
+            with patch("tools.verify_images._EXPECTED_BASE_IMAGE_ID", self.plan["base_image_id"]):
+                verify_image(self.plan["images"][0])
 
     @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
@@ -97,7 +99,8 @@ class VerifyImagesTests(TestCase):
         mock_query_image_base_id.return_value = self.plan["base_image_id"]
         mock_query_installed_packages.return_value = {"libalpha1": "1.0-1safelibs1"}
 
-        verify_image(self.plan["images"][0], expected_base_image_id=self.plan["base_image_id"])
+        with patch("tools.verify_images._EXPECTED_BASE_IMAGE_ID", self.plan["base_image_id"]):
+            verify_image(self.plan["images"][0])
 
     @patch("tools.verify_images._query_image_base_id")
     @patch("tools.verify_images._query_image_plan_digest")
@@ -110,7 +113,8 @@ class VerifyImagesTests(TestCase):
         mock_query_image_base_id.return_value = "sha256:stale-base"
 
         with self.assertRaisesRegex(ValueError, "base image id"):
-            verify_image(self.plan["images"][0], expected_base_image_id=self.plan["base_image_id"])
+            with patch("tools.verify_images._EXPECTED_BASE_IMAGE_ID", self.plan["base_image_id"]):
+                verify_image(self.plan["images"][0])
 
     @patch("tools.verify_images.verify_image")
     def test_verify_build_plan_checks_filtered_request_metadata(self, mock_verify_image) -> None:
