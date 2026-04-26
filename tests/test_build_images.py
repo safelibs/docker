@@ -12,6 +12,7 @@ from tools.build_images import (
     PLAN_DIGEST_LABEL,
     _IMAGE_PLAN_DIGESTS_BY_REF,
     _aggregate_cache_image_ref,
+    _build_execution_order,
     _local_image_matches,
     _preserve_full_aggregate_cache,
     _restore_full_aggregate_from_cache,
@@ -198,6 +199,24 @@ class BuildImagesTests(TestCase):
         self.assertFalse((context_dir / "debs-02-deferred").exists())
         dockerfile = (context_dir / "Dockerfile").read_text(encoding="utf-8")
         self.assertEqual(render_dockerfile("ubuntu:24.04"), dockerfile)
+
+    def test_build_execution_order_moves_aggregate_first(self) -> None:
+        prepared_contexts = [
+            ({"image_ref": "safelibs/alpha:latest"}, self.temp_root / "contexts" / "alpha"),
+            ({"image_ref": "safelibs/all:latest"}, self.temp_root / "contexts" / "all"),
+            ({"image_ref": "safelibs/delta:latest"}, self.temp_root / "contexts" / "delta"),
+        ]
+
+        ordered = _build_execution_order(prepared_contexts)
+
+        self.assertEqual(
+            [
+                "safelibs/all:latest",
+                "safelibs/alpha:latest",
+                "safelibs/delta:latest",
+            ],
+            [image_spec["image_ref"] for image_spec, _ in ordered],
+        )
 
     def test_docker_build_uses_plain_context_dir(self) -> None:
         context_dir = self.temp_root / "contexts" / "all"

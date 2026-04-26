@@ -402,6 +402,14 @@ def _aggregate_cache_image_spec(image_spec: dict) -> dict:
     return cache_image_spec
 
 
+def _build_execution_order(
+    prepared_contexts: list[tuple[dict, Path]],
+) -> list[tuple[dict, Path]]:
+    aggregate_contexts = [item for item in prepared_contexts if _is_aggregate_image(item[0])]
+    library_contexts = [item for item in prepared_contexts if not _is_aggregate_image(item[0])]
+    return aggregate_contexts + library_contexts
+
+
 def _local_image_matches(image_spec: dict) -> bool:
     image_ref = image_spec["image_ref"]
     if not _local_image_exists(image_ref):
@@ -510,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
             prepared_contexts.append((image_spec, context_dir))
         output_path = write_json(args.output, plan)
         built_images = 0
-        for image_spec, context_dir in prepared_contexts:
+        for image_spec, context_dir in _build_execution_order(prepared_contexts):
             if _local_image_matches(image_spec):
                 continue
             docker_build(image_spec["image_ref"], context_dir)
