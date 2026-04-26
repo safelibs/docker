@@ -11,6 +11,7 @@ from . import read_json
 
 DEFAULT_IMAGE_BUILD_PLAN = Path("dist/image-build-plan.json")
 DOCKER_COMMAND = "docker"
+PUBLISH_IMAGE_NAMESPACE = "safelibs"
 
 
 def load_image_build_plan(path: Path) -> dict:
@@ -77,8 +78,37 @@ def _is_aggregate_image(image_ref: str) -> bool:
     return image_ref.rsplit("/", 1)[-1] == "all:latest"
 
 
+def _validate_publish_image_ref(image_ref: str) -> None:
+    prefix = f"{PUBLISH_IMAGE_NAMESPACE}/"
+    if not image_ref.startswith(prefix):
+        raise ValueError(
+            "Refusing to publish image_ref outside the required safelibs namespace: "
+            f"{image_ref!r}"
+        )
+
+    repository, separator, tag = image_ref.partition(":")
+    if separator != ":" or tag != "latest":
+        raise ValueError(
+            "Refusing to publish image_ref outside the required safelibs/*:latest contract: "
+            f"{image_ref!r}"
+        )
+
+    leaf = repository[len(prefix) :]
+    if not leaf or "/" in leaf:
+        raise ValueError(
+            "Refusing to publish malformed safelibs image_ref from build plan: "
+            f"{image_ref!r}"
+        )
+
+
 def ordered_image_refs(plan: dict) -> list[str]:
     """Return deterministic publish order: per-library images, then aggregate."""
+
+    if plan.get("image_namespace") != PUBLISH_IMAGE_NAMESPACE:
+        raise ValueError(
+            "Refusing to publish image build plan outside the required safelibs namespace: "
+            f"{plan.get('image_namespace')!r}"
+        )
 
     images = plan.get("images") or []
     if not images:
@@ -91,6 +121,7 @@ def ordered_image_refs(plan: dict) -> list[str]:
         image_ref = image_spec.get("image_ref")
         if not isinstance(image_ref, str) or not image_ref:
             raise ValueError("Image build plan contains an image without a valid image_ref.")
+        _validate_publish_image_ref(image_ref)
         if image_ref in seen_refs:
             raise ValueError(f"Image build plan contains duplicate image_ref {image_ref!r}.")
         seen_refs.add(image_ref)

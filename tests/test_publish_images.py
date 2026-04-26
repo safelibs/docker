@@ -30,6 +30,23 @@ class PublishImagesTests(TestCase):
         with self.assertRaisesRegex(ValueError, "requested_libraries"):
             require_full_selection(filtered_plan)
 
+    @patch("tools.publish_images.push_image")
+    @patch("tools.publish_images.assert_local_image_exists")
+    def test_publish_images_rejects_non_safelibs_namespace(
+        self,
+        mock_assert_local_image_exists,
+        mock_push_image,
+    ) -> None:
+        plan = copy.deepcopy(self.plan)
+        plan["image_namespace"] = "example"
+        plan["images"][0]["image_ref"] = "example/alpha:latest"
+
+        with self.assertRaisesRegex(ValueError, "safelibs namespace"):
+            publish_images(plan)
+
+        mock_assert_local_image_exists.assert_not_called()
+        mock_push_image.assert_not_called()
+
     @patch("tools.publish_images.subprocess.run")
     def test_assert_local_image_exists_rejects_missing_image(self, mock_run) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
