@@ -3,14 +3,11 @@ from __future__ import annotations
 import copy
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
 from tools import ensure_directory, read_json, repo_relative_path, repo_root
 from tools.build_images import (
-    _IMAGE_SPECS_BY_REF,
-    _requires_aggregate_fallback,
     build_image_plan,
     docker_build,
     prepare_context,
@@ -188,60 +185,17 @@ class BuildImagesTests(TestCase):
         dockerfile = (context_dir / "Dockerfile").read_text(encoding="utf-8")
         self.assertEqual(render_dockerfile("ubuntu:24.04"), dockerfile)
 
-    def test_aggregate_runtime_fallback_uses_canonical_context_only(self) -> None:
-        lock_data = self._materialize_locked_debs(self.lock_data)
-        lock_data["libraries"][0]["library"] = "libxml"
-        lock_data["libraries"][0]["port_debs"][0]["package"] = "libxml2"
-        lock_data["libraries"][1]["library"] = "omega"
-        plan = build_image_plan(
-            lock_data,
-            image_namespace="safelibs",
-            base_image="ubuntu:24.04",
-            requested_libraries=[],
-        )
-        aggregate_image = plan["images"][-1]
-        context_dir = prepare_context(aggregate_image, self.temp_root / "contexts")
+    def test_docker_build_uses_plain_context_dir(self) -> None:
+        context_dir = self.temp_root / "contexts" / "all"
+        context_dir.mkdir(parents=True)
 
-        self.assertTrue(_requires_aggregate_fallback(aggregate_image))
-        _IMAGE_SPECS_BY_REF.clear()
-        _IMAGE_SPECS_BY_REF[aggregate_image["image_ref"]] = aggregate_image
-        build_failure = RuntimeError("shared-mime-info\nSegmentation fault")
-        with patch("tools.build_images.uuid.uuid4") as mock_uuid, patch(
-            "tools.build_images._docker_run"
-        ) as mock_docker_run:
-            mock_uuid.return_value.hex = "fixed"
-            mock_docker_run.side_effect = [
-                SimpleNamespace(returncode=1, stderr=str(build_failure), stdout=""),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ]
+        with patch("tools.build_images._docker_run") as mock_docker_run:
+            docker_build("safelibs/all:latest", context_dir)
 
-            docker_build(aggregate_image["image_ref"], context_dir)
-
-        calls = [call.args[0] for call in mock_docker_run.call_args_list]
-        self.assertEqual(
-            ["docker", "build", "--pull", "-t", aggregate_image["image_ref"], str(context_dir)],
-            calls[0],
+        mock_docker_run.assert_called_once_with(
+            ["docker", "build", "--pull", "-t", "safelibs/all:latest", str(context_dir)],
+            env={"DOCKER_BUILDKIT": "0"},
         )
-        self.assertEqual(["docker", "pull", "ubuntu:24.04"], calls[1])
-        self.assertEqual(
-            ["docker", "run", "--name", "safelibs-build-fixed", "-d", "ubuntu:24.04", "sleep", "infinity"],
-            calls[2],
-        )
-        self.assertEqual(
-            ["docker", "cp", f"{context_dir / 'debs'}/.", "safelibs-build-fixed:/tmp/debs/"],
-            calls[4],
-        )
-        joined_calls = "\n".join(" ".join(command) for command in calls)
-        self.assertNotIn(".staged-build", joined_calls)
-        self.assertIn(str(context_dir / "debs"), joined_calls)
-        _IMAGE_SPECS_BY_REF.clear()
 
     def test_build_image_plan_rejects_base_image_mismatch(self) -> None:
         with self.assertRaisesRegex(ValueError, "BASE_IMAGE"):
