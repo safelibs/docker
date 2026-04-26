@@ -14,7 +14,14 @@ so operators can see which original Ubuntu packages were not ported, but they
 are not synthesized into separate SafeLibs `.deb` artifacts.
 
 Docker images are built from the locked `.deb` set into one image per library
-plus the aggregate `safelibs/all:latest` image. The default base image is
+plus the aggregate `safelibs/all:latest` image. Library images install the full
+locked package set for that library. The aggregate image installs the combined
+runtime library surface only, excluding development packages, bindings, and
+tooling (`-dev`, `gir1.2-*`, `python3-*`, `*-tools`, `*-progs`, `*-utils`, and
+non-`lib*` packages) so the full-selection build remains practical. Images lay
+down the locked SafeLibs `.deb` payloads directly with `dpkg` instead of
+resolving mutable Ubuntu repository dependencies during the build. The default
+base image is
 `ubuntu:24.04` because the validator suite and the prepared SafeLibs `.deb`
 artifacts are locked against the Ubuntu Noble environment encoded in the proof
 metadata; changing the base image would break that contract.
@@ -34,7 +41,8 @@ Run the commands in this order when you want a fresh local build:
 - `make build-images`
   Build per-library images plus `safelibs/all:latest` from the locked package
   set, reusing matching local contexts under `.work/contexts/`, and write
-  `dist/image-build-plan.json`.
+  `dist/image-build-plan.json`. The aggregate image keeps only the shared
+  runtime library surface.
 - `make verify-images`
   Run `dpkg-query` inside the built images and verify labels, package versions,
   and the base image id against `dist/image-build-plan.json`.

@@ -22,6 +22,7 @@ DEFAULT_BASE_IMAGE = "ubuntu:24.04"
 DOCKER_COMMAND = "docker"
 PLAN_DIGEST_LABEL = "org.safelibs.image-plan-digest"
 BASE_IMAGE_ID_LABEL = "org.safelibs.base-image-id"
+DOCKERFILE_DIGEST_LABEL = "org.safelibs.dockerfile-digest"
 _IMAGE_PLAN_DIGESTS_BY_REF: dict[str, str] = {}
 _CURRENT_BASE_IMAGE_ID = ""
 FULL_AGGREGATE_CACHE_TAG = "full-selection-cache"
@@ -110,6 +111,8 @@ def _build_aggregate_packages(selected_libraries: list[dict]) -> list[dict]:
     for library_entry in selected_libraries:
         library_name = library_entry["library"]
         for package in library_entry.get("port_debs") or []:
+            if not _is_aggregate_runtime_package(package):
+                continue
             package_name = package["package"]
             existing = packages_by_name.get(package_name)
             if existing is None:
@@ -126,6 +129,19 @@ def _build_aggregate_packages(selected_libraries: list[dict]) -> list[dict]:
                 )
 
     return aggregate_packages
+
+
+def _is_aggregate_runtime_package(package: dict) -> bool:
+    package_name = package["package"]
+    return not (
+        not package_name.startswith("lib")
+        or package_name.endswith("-tools")
+        or package_name.endswith("-progs")
+        or package_name.endswith("-utils")
+        or package_name.endswith("-dev")
+        or package_name.startswith("gir1.2-")
+        or package_name.startswith("python3-")
+    )
 
 
 def _image_plan_digest(image_spec: dict) -> str:
@@ -214,15 +230,17 @@ def render_dockerfile(base_image: str) -> str:
         "# syntax=docker/dockerfile:1\n"
         f"FROM {base_image}\n"
         "COPY debs/ /tmp/debs/\n"
-        "RUN --mount=type=cache,target=/var/cache/apt,sharing=locked "
-        "--mount=type=cache,target=/var/lib/apt,sharing=locked "
-        "set -eux; rm -f /etc/apt/apt.conf.d/docker-clean; "
-        "for attempt in 1 2 3; do apt-get update -o Acquire::Retries=3 && "
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y -o Acquire::Retries=3 "
-        "-o DPkg::Use-Pty=0 --no-install-recommends /tmp/debs/*.deb && break; "
-        "if [ \"$attempt\" -eq 3 ]; then exit 1; fi; rm -rf /var/lib/apt/lists/*; "
-        "sleep \"$attempt\"; done; rm -rf /tmp/debs\n"
+        "RUN set -eux; dpkg --force-unsafe-io --force-depends -i /tmp/debs/*.deb; "
+        "rm -rf /tmp/debs\n"
     )
+
+
+def _dockerfile_digest(base_image: str) -> str:
+    return hashlib.sha256(render_dockerfile(base_image).encode("utf-8")).hexdigest()
+
+
+def _context_dockerfile_digest(context_dir: Path) -> str:
+    return hashlib.sha256((context_dir / "Dockerfile").read_bytes()).hexdigest()
 
 
 def _validate_local_deb(package: dict) -> Path:
@@ -387,6 +405,10 @@ def _query_image_base_id(image_ref: str) -> str | None:
     return _query_image_label(image_ref, BASE_IMAGE_ID_LABEL)
 
 
+def _query_image_dockerfile_digest(image_ref: str) -> str | None:
+    return _query_image_label(image_ref, DOCKERFILE_DIGEST_LABEL)
+
+
 def _is_aggregate_image(image_spec: dict) -> bool:
     return image_spec["image_ref"].rsplit("/", 1)[-1] == "all:latest"
 
@@ -417,6 +439,8 @@ def _local_image_matches(image_spec: dict) -> bool:
     if _query_image_plan_digest(image_ref) != image_spec.get("plan_digest"):
         return False
     if _query_image_base_id(image_ref) != _CURRENT_BASE_IMAGE_ID:
+        return False
+    if _query_image_dockerfile_digest(image_ref) != _dockerfile_digest(image_spec["base_image"]):
         return False
 
     expected_versions = {
@@ -456,6 +480,7 @@ def docker_build(image_ref: str, context_dir: Path) -> None:
         raise ValueError(f"Missing plan digest for Docker image {image_ref}.")
     if not _CURRENT_BASE_IMAGE_ID:
         raise ValueError(f"Missing base image id for Docker image {image_ref}.")
+    dockerfile_digest = _context_dockerfile_digest(context_dir)
     _docker_run(
         [
             DOCKER_COMMAND,
@@ -465,6 +490,8 @@ def docker_build(image_ref: str, context_dir: Path) -> None:
             f"{PLAN_DIGEST_LABEL}={plan_digest}",
             "--label",
             f"{BASE_IMAGE_ID_LABEL}={_CURRENT_BASE_IMAGE_ID}",
+            "--label",
+            f"{DOCKERFILE_DIGEST_LABEL}={dockerfile_digest}",
             "-t",
             image_ref,
             str(context_dir),
