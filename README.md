@@ -32,7 +32,7 @@ Run the commands in this order when you want a fresh local build:
 
 - `make resolve-validator`
   Fetch the live validator payload and write `dist/validator-selection.json`.
-  Set `LIBRARIES='cjson libpng'` to request a subset while preserving validator
+  Set `LIBRARIES='cjson libwebp'` to request a subset while preserving validator
   order.
 - `make fetch-port-debs`
   Consume the selection manifest, reuse any matching files already present under
@@ -64,7 +64,7 @@ multi-architecture manifests, alternate registries, or alternate repository
 names in the initial workflow.
 
 Subset runs are allowed only for local or manual dry-run smoke tests. A subset
-selection such as `LIBRARIES='cjson libpng'` is never publishable, even if the
+selection such as `LIBRARIES='cjson libwebp'` is never publishable, even if the
 subset builds and verifies successfully.
 
 ## GitHub Actions
