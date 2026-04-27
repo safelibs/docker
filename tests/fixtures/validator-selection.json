@@ -47,7 +47,10 @@
           "size": 18
         }
       ],
-      "unported_original_packages": []
+      "unported_original_packages": [],
+      "runtime_packages": [
+        "libalpha1"
+      ]
     },
     {
       "library": "gamma",
@@ -77,6 +80,9 @@
       ],
       "unported_original_packages": [
         "libgamma0"
+      ],
+      "runtime_packages": [
+        "libgamma1"
       ]
     },
     {
@@ -105,7 +111,10 @@
           "size": 18
         }
       ],
-      "unported_original_packages": []
+      "unported_original_packages": [],
+      "runtime_packages": [
+        "libdelta1"
+      ]
     }
   ]
 }

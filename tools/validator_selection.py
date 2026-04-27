@@ -74,10 +74,16 @@ def build_selection_manifest(site_url: str, proof: dict, requested_libraries: li
     selected_libraries = select_libraries(proof, requested_libraries)
     manifest_libraries = []
     for library_entry in selected_libraries:
+        if "runtime_packages" not in library_entry:
+            raise ValueError(
+                f"library {library_entry.get('library')!r} is missing runtime_packages; "
+                "the validator must publish runtime_packages for every port"
+            )
         manifest_libraries.append(
             {
                 "library": library_entry["library"],
                 "apt_packages": copy.deepcopy(library_entry["apt_packages"]),
+                "runtime_packages": copy.deepcopy(library_entry["runtime_packages"]),
                 "totals": copy.deepcopy(library_entry["totals"]),
                 "port_repository": library_entry["port_repository"],
                 "port_tag_ref": library_entry["port_tag_ref"],

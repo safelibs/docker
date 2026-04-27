@@ -50,6 +50,9 @@
           "source_url": "https://github.com/safelibs/port-alpha/releases/download/build-alpha1234/libalpha1_1.0-1safelibs1_amd64.deb",
           "local_path": ".work/debs/port-04-test/alpha/libalpha1_1.0-1safelibs1_amd64.deb"
         }
+      ],
+      "runtime_packages": [
+        "libalpha1"
       ]
     },
     {
@@ -83,6 +86,9 @@
           "source_url": "https://github.com/safelibs/port-gamma/releases/download/build-gamma1234/libgamma1_2.0-1safelibs1_amd64.deb",
           "local_path": ".work/debs/port-04-test/gamma/libgamma1_2.0-1safelibs1_amd64.deb"
         }
+      ],
+      "runtime_packages": [
+        "libgamma1"
       ]
     },
     {
@@ -114,6 +120,9 @@
           "source_url": "https://github.com/safelibs/port-delta/releases/download/build-delta1234/libdelta1_3.0-1safelibs1_all.deb",
           "local_path": ".work/debs/port-04-test/delta/libdelta1_3.0-1safelibs1_all.deb"
         }
+      ],
+      "runtime_packages": [
+        "libdelta1"
       ]
     }
   ]

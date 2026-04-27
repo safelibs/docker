@@ -195,6 +195,7 @@ class BuildImagesTests(TestCase):
             "sha256": "deadbeef" * 8,
             "size": 99,
         }
+        lock_data["libraries"][1]["runtime_packages"] = ["libalpha1"]
 
         with self.assertRaisesRegex(ValueError, "package conflict"):
             build_image_plan(

@@ -112,10 +112,11 @@ def _build_aggregate_packages(selected_libraries: list[dict]) -> list[dict]:
 
     for library_entry in selected_libraries:
         library_name = library_entry["library"]
+        runtime_set = _runtime_package_set(library_entry)
         for package in library_entry.get("port_debs") or []:
-            if not _is_aggregate_runtime_package(package):
-                continue
             package_name = package["package"]
+            if package_name not in runtime_set:
+                continue
             existing = packages_by_name.get(package_name)
             if existing is None:
                 package_copy = copy.deepcopy(package)
@@ -133,17 +134,40 @@ def _build_aggregate_packages(selected_libraries: list[dict]) -> list[dict]:
     return aggregate_packages
 
 
-def _is_aggregate_runtime_package(package: dict) -> bool:
-    package_name = package["package"]
-    return not (
-        not package_name.startswith("lib")
-        or package_name.endswith("-tools")
-        or package_name.endswith("-progs")
-        or package_name.endswith("-utils")
-        or package_name.endswith("-dev")
-        or package_name.startswith("gir1.2-")
-        or package_name.startswith("python3-")
-    )
+_RUNTIME_PACKAGE_SUFFIX_EXCLUDES = ("-dev", "-doc", "-tools", "-progs", "-utils", "-tests")
+_RUNTIME_PACKAGE_PREFIX_EXCLUDES = ("gir1.2-", "python3-")
+
+
+def _runtime_package_set(library_entry: dict) -> set[str]:
+    """Return the canonical runtime-package allow-list for a library.
+
+    The validator publishes runtime_packages alongside apt_packages. We fall
+    back to applying the same heuristic locally on apt_packages only when the
+    validator output predates that field, so a freshly pushed validator does
+    not have to finish republishing before docker rebuilds succeed.
+    """
+
+    runtime_packages = library_entry.get("runtime_packages")
+    if isinstance(runtime_packages, list) and runtime_packages:
+        return {str(name) for name in runtime_packages}
+    apt_packages = library_entry.get("apt_packages") or []
+    fallback: list[str] = []
+    for package in apt_packages:
+        if not isinstance(package, str) or not package.startswith("lib"):
+            continue
+        if any(package.endswith(suffix) for suffix in _RUNTIME_PACKAGE_SUFFIX_EXCLUDES):
+            continue
+        if any(package.startswith(prefix) for prefix in _RUNTIME_PACKAGE_PREFIX_EXCLUDES):
+            continue
+        fallback.append(package)
+    if not fallback:
+        library_name = library_entry.get("library", "<unknown>")
+        raise ValueError(
+            f"library {library_name!r} has no runtime library packages; "
+            f"neither validator runtime_packages nor apt_packages yields a "
+            f"non-empty runtime subset (apt_packages={list(apt_packages)})"
+        )
+    return set(fallback)
 
 
 def _image_plan_digest(image_spec: dict) -> str:
