@@ -14,6 +14,28 @@ from . import write_json
 DEFAULT_SITE_URL = "https://safelibs.github.io/validator/site-data.json"
 DEFAULT_MODE = "port-04-test"
 DEFAULT_OUTPUT = Path("dist/validator-selection.json")
+_RUNTIME_PACKAGE_SUFFIX_EXCLUDES = ("-dev", "-doc", "-tools", "-progs", "-utils", "-tests")
+_RUNTIME_PACKAGE_PREFIX_EXCLUDES = ("gir1.2-", "python3-")
+
+
+def _runtime_packages_fallback(apt_packages: list[str]) -> list[str]:
+    """Mirror the validator runtime_packages heuristic.
+
+    Used as a fallback when the validator output predates the
+    runtime_packages field, so a freshly pushed validator does not have to
+    finish republishing before docker rebuilds succeed.
+    """
+
+    runtime: list[str] = []
+    for package in apt_packages or []:
+        if not isinstance(package, str) or not package.startswith("lib"):
+            continue
+        if any(package.endswith(suffix) for suffix in _RUNTIME_PACKAGE_SUFFIX_EXCLUDES):
+            continue
+        if any(package.startswith(prefix) for prefix in _RUNTIME_PACKAGE_PREFIX_EXCLUDES):
+            continue
+        runtime.append(package)
+    return runtime
 
 
 def fetch_site_data(site_url: str) -> dict:
@@ -74,16 +96,19 @@ def build_selection_manifest(site_url: str, proof: dict, requested_libraries: li
     selected_libraries = select_libraries(proof, requested_libraries)
     manifest_libraries = []
     for library_entry in selected_libraries:
-        if "runtime_packages" not in library_entry:
+        runtime_packages = library_entry.get("runtime_packages")
+        if not isinstance(runtime_packages, list) or not runtime_packages:
+            runtime_packages = _runtime_packages_fallback(library_entry.get("apt_packages") or [])
+        if not runtime_packages:
             raise ValueError(
-                f"library {library_entry.get('library')!r} is missing runtime_packages; "
-                "the validator must publish runtime_packages for every port"
+                f"library {library_entry.get('library')!r} has no runtime library packages; "
+                "neither validator runtime_packages nor apt_packages yields a non-empty subset"
             )
         manifest_libraries.append(
             {
                 "library": library_entry["library"],
                 "apt_packages": copy.deepcopy(library_entry["apt_packages"]),
-                "runtime_packages": copy.deepcopy(library_entry["runtime_packages"]),
+                "runtime_packages": list(runtime_packages),
                 "totals": copy.deepcopy(library_entry["totals"]),
                 "port_repository": library_entry["port_repository"],
                 "port_tag_ref": library_entry["port_tag_ref"],
