@@ -12,7 +12,7 @@ from pathlib import Path
 from . import write_json
 
 DEFAULT_SITE_URL = "https://safelibs.github.io/validator/site-data.json"
-DEFAULT_MODE = "port-04-test"
+DEFAULT_MODE = "port"
 DEFAULT_OUTPUT = Path("dist/validator-selection.json")
 _RUNTIME_PACKAGE_SUFFIX_EXCLUDES = ("-dev", "-doc", "-tools", "-progs", "-utils", "-tests")
 _RUNTIME_PACKAGE_PREFIX_EXCLUDES = ("gir1.2-", "python3-")

@@ -22,7 +22,7 @@ from . import (
 )
 
 DEFAULT_SELECTION_MANIFEST = Path("dist/validator-selection.json")
-DEFAULT_OUTPUT_ROOT = Path(".work/debs/port-04-test")
+DEFAULT_OUTPUT_ROOT = Path(".work/debs/port")
 DEFAULT_OUTPUT = Path("dist/port-debs-lock.json")
 RETRYABLE_HTTP_CODES = {408, 429, 500, 502, 503, 504}
 ALLOWED_ARCHITECTURES = {"amd64", "all"}
