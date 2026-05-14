@@ -132,6 +132,40 @@ class BuildImagesTests(TestCase):
 
     @patch("tools.build_images._inspect_deb_dependency_fields")
     @patch("tools.build_images._validate_local_deb")
+    def test_dependency_requirements_skip_clauses_satisfied_by_local_provides(
+        self,
+        mock_validate_local_deb,
+        mock_inspect_deb_dependency_fields,
+    ) -> None:
+        # libglib2.0-dev Depends on libglib2.0-dev-bin-linux (a virtual)
+        # that libglib2.0-dev-bin provides. apt-get satisfy can't see local
+        # debs, so the virtual must be treated as locally satisfied.
+        mock_validate_local_deb.side_effect = [
+            Path("/tmp/libglib2.0-dev.deb"),
+            Path("/tmp/libglib2.0-dev-bin.deb"),
+        ]
+        mock_inspect_deb_dependency_fields.side_effect = [
+            {
+                "Depends": "libglib2.0-dev-bin-linux (= 2.80.0-6ubuntu3.8+safelibs1), libffi-dev",
+            },
+            {
+                "Depends": "python3-packaging",
+                "Provides": "libglib2.0-dev-bin-linux (= 2.80.0-6ubuntu3.8+safelibs1)",
+            },
+        ]
+
+        self.assertEqual(
+            ["libffi-dev", "python3-packaging"],
+            _dependency_requirements_for_packages(
+                [
+                    {"package": "libglib2.0-dev", "local_path": ".work/libglib2.0-dev.deb"},
+                    {"package": "libglib2.0-dev-bin", "local_path": ".work/libglib2.0-dev-bin.deb"},
+                ]
+            ),
+        )
+
+    @patch("tools.build_images._inspect_deb_dependency_fields")
+    @patch("tools.build_images._validate_local_deb")
     def test_image_dependency_requirements_cache_does_not_mutate_image_spec(
         self,
         mock_validate_local_deb,

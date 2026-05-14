@@ -400,6 +400,7 @@ def _inspect_deb_dependency_fields(deb_path: Path) -> dict[str, str]:
             "Package",
             "Pre-Depends",
             "Depends",
+            "Provides",
         ],
         check=False,
         capture_output=True,
@@ -412,13 +413,30 @@ def _inspect_deb_dependency_fields(deb_path: Path) -> dict[str, str]:
 
 
 def _dependency_requirements_for_packages(packages: list[dict]) -> list[str]:
-    local_package_names = {package["package"] for package in packages}
-    requirements: list[str] = []
-    seen_requirements: set[str] = set()
-
+    local_package_names: set[str] = {package["package"] for package in packages}
+    inspected_fields: list[dict[str, str]] = []
     for package in packages:
         deb_path = _validate_local_deb(package)
         control_fields = _inspect_deb_dependency_fields(deb_path)
+        inspected_fields.append(control_fields)
+        provides_value = control_fields.get("Provides")
+        if not provides_value:
+            continue
+        # Provides may carry virtual-package names that other locally-built debs
+        # depend on (e.g. libglib2.0-dev-bin provides libglib2.0-dev-bin-linux).
+        # apt-get satisfy only consults configured repositories, so any virtual
+        # left in the requirement list would be unresolvable. Treat anything
+        # provided by a local deb as locally satisfied.
+        for provides_group in _split_dependency_field(provides_value, ","):
+            for clause in _split_dependency_field(provides_group, "|"):
+                provided_name = _dependency_clause_package_name(clause)
+                if provided_name:
+                    local_package_names.add(provided_name)
+
+    requirements: list[str] = []
+    seen_requirements: set[str] = set()
+
+    for control_fields in inspected_fields:
         for field_name in ("Pre-Depends", "Depends"):
             field_value = control_fields.get(field_name)
             if not field_value:
